@@ -34,12 +34,61 @@ def discretize_states(state, bins):
     # each state (1/4) has its own lower and upper bounds to run into this formula
     ratios = [(state[i] + abs(lower_bounds[i])) / (upper_bounds[i] - lower_bounds[i]) for i in range(len(state))]
 
+    # ratios is the normalized value
+    # if you have 6 bins, it’s like having 6 intervals (labeled 0, 1, 2, 3, 4, and 5).
+    # Example: Each bin could represent a time interval like 1 second.
+    # This means the value is between bin 3 and bin 4.
+    #
+    #     Bin 3 might represent 3 seconds.
+    #     Bin 4 might represent 4 seconds.
+    #     The value you are looking at is 3.5 seconds (halfway between 3 and 4).
+    # So now when you reach 3s, you can execute this action
+    # round((bins[i] - 1) * ratios[i]):
+    #     The round() function rounds the result to the nearest integer, giving us the closest bin. ex. 2.5 -> 3
+    # for i in range(len(state)): This loops over each component of the state (e.g., cart position, velocity) and performs the above operation for each one.
     new_state = [int(round((bin[i] - 1) * ratios[i])) for i in range(len(state))]
+
+    # max(0, new_state[i]):
+    #
+    #     This ensures that the bin index is at least 0.
+    #     If new_state[i] is less than 0, it will be clamped to 0. This ensures that the bin index doesn’t go below the minimum valid value (which is bin 0).
+    #
+    # Using min(bins[i] - 1, new_state[i]) ensures that the bin index:
+    #     Never exceeds the highest valid bin index (preventing an out-of-bounds error when accessing the Q-table).
+    #     Keeps the state properly within the range of valid bin indices.
+    new_state = [min(bins[i] - 1, max(0, new_state[i])) for i in range(len(state))]
+
+    # the discretized state (which was a list of bin indices) is converted into a tuple.
+    # it’s common to use a tuple as the key in a Q-table because tuples are immutable and can be easily used as keys in a dictionary
+    return tuple(new_state)
 
 # Function to inject noise into the observation
 def inject_noise(state, noise_factor):
     noise = np.random.randn(*state.shape) * noise_factor
     return state + noise  # Add noise to the state observations
+
+# Strategy for balancing exploration and exploitation
+def choose_action(state, epsilon):
+    # np.random.uniform(0, 1) generates a random number between 0 and 1.
+    # epsilon is a parameter that controls how often the agent should explore.
+    if np.random.uniform(0, 1) < epsilon:
+        return env.action_space.sample()  # Explore: random action
+    else:
+        return np.argmax(q_table[state])  # Exploit: action with the highest Q-value
+
+# Q-learning update rule
+# q_table: This is a table where the agent keeps track of the expected rewards for different actions in each state. It stores the agent's "knowledge" of what actions to take.
+# state: The current situation the agent is in (e.g., the position of a cart in CartPole).
+# action: The choice the agent made while in the current state (e.g., move left or right).
+# reward: The immediate feedback the agent gets after taking the action (e.g., positive if it keeps the pole balanced, negative if it fails).
+# next_state: The new situation the agent ends up in after taking the action (e.g., the new position of the cart).
+# alpha: The learning rate, which decides how much the agent should adjust its previous knowledge based on new information. A higher value means it learns more from new experiences.
+# gamma: The discount factor, which tells the agent how important future rewards are compared to immediate rewards. A higher value means the agent cares more about long-term rewards than short-term gains.
+def update_q_table(q_table, state, action, reward, next_state, alpha, gamma):
+    best_next_action = np.argmax(q_table[next_state])
+    q_table[state][action] = q_table[state][action] + alpha * (
+        reward + gamma * q_table[next_state][best_next_action] - q_table[state][action]
+    )
 
 # Running multiple episodes
 for episode in range(num_episodes):
