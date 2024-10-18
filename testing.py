@@ -114,6 +114,14 @@ def update_q_table(q_table, state, action, reward, next_state, alpha, gamma):
         reward + gamma * q_table[next_state][best_next_action] - q_table[state][action]
     )
 
+# Training parameters
+initial_epsilon = 1.0  # Start with 100% exploration
+min_epsilon = 0.01  # Minimum exploration rate
+decay_rate = 0.995  # Rate at which epsilon decays
+epsilon = initial_epsilon  # Set epsilon to start value before training
+alpha = 0.1  # Learning rate
+gamma = 0.9  # Discount factor
+
 # Running multiple episodes
 for episode in range(num_episodes):
     # Reset the environment to start a new episode
@@ -121,25 +129,12 @@ for episode in range(num_episodes):
     state = inject_noise(state, noise_factor) # Applying noise to the initial state
     state = discretize_states(state, n_bins) # Converts continuous values into discrete categories (bins) to make them easier to manage.
 
-    epsilon = 0.1  # Exploration rate (e.g., 10% chance of taking a random action)
-    alpha = 0.1  # Learning rate (e.g., adjust Q-values by 10% of the new information)
-    gamma = 0.9  # Discount factor (e.g., future rewards are valued at 90% of their actual value)
-
     total_reward = 0  # Track total reward in each episode
     adjusted_reward = 0  # Initialize the adjusted reward
 
-    for step in range(5000000):  # Increased to 500 steps per episode
+    for step in range(500):  # Steps per episode
         # Strategy to balancing exploration and exploitation
         action = choose_action(state, epsilon)
-
-        # Performing the action in the enviorment
-        next_state, reward, done, truncated, info = env.step(action)
-
-        # Inject noise into the observations (optional)
-        noisy_state = inject_noise(state, noise_factor)
-
-        # Take a random action (you can replace this with an RL agent's action)
-        action = env.action_space.sample()
 
         # Perform the action in the environment
         next_state, reward, done, truncated, info = env.step(action)
@@ -150,8 +145,8 @@ for episode in range(num_episodes):
         # truncated checks if the episode ends due to te time limit, confirms that its not because the agent failed
 
         # Apply noise and discretize the next state
-        noisy_state = inject_noise(noisy_state, noise_factor)
-        next_state_discrete = discretize_states(next_state, n_bins)
+        next_state_noisy = inject_noise(next_state, noise_factor)
+        next_state_discrete = discretize_states(next_state_noisy, n_bins)
 
         # Task switching based on the step count (rewards change after switch_threshold steps)
         if step < switch_threshold:
@@ -159,7 +154,9 @@ for episode in range(num_episodes):
             adjusted_reward = reward
         else:
             # Task 2: Modify the reward based on the pole's angle (state[2] is the pole angle)
-            pole_angle = state[2]  # Get the pole angle from the state
+            pole_angle = next_state[2]  # Get the pole angle from the state
+            cart_position = next_state[0] # Get the cart's position
+
             if abs(pole_angle) < 0.1:
                 # Give a higher reward if the pole is near upright
                 adjusted_reward = 2 * reward
@@ -167,6 +164,9 @@ for episode in range(num_episodes):
                 # Penalize if the pole is at a steep angle (about to fall)
                 adjusted_reward = reward - 1
 
+            # Add penalty for moving too far from the center (cart position)
+            if abs(cart_position) > 1.0: # Threshold for cart position, adjust as needed
+                adjusted_reward -= 1
 
         # Update the Q-table using Q-learning
         update_q_table(q_table, state, action, adjusted_reward, next_state_discrete, alpha, gamma)
@@ -184,6 +184,9 @@ for episode in range(num_episodes):
         if done or truncated:
             print(f"Episode {episode+1} finished after {step+1} steps with total reward: {total_reward}")
             break
+
+    # Apply epsilon decay after each episode
+    epsilon = max(min_epsilon, epsilon * decay_rate)
 
 # Close the environment after running all episodes
 env.close()
