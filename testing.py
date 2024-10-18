@@ -1,3 +1,7 @@
+# !pip install gymnasium
+# !pip install numpy
+# !pip install matplotlib
+
 import gymnasium as gym
 import numpy as np
 
@@ -12,14 +16,20 @@ num_episodes = 100  # Increased number of episodes to run
 # Initializing the Q-table: (number of states, number of actions)
 # Cartpole doesn't have a discrete observation space, so this is recommended discreting metrics
 # Number of discrete states for each dimension (position, velocity, angle, angular velocity)
-n_bins = (6,12)
-q_table = np.zeros([env.observation_space.shape[0], env.action_space.shape.n])
-# env.observation_space = Searches the entire search space of the enviorment
-# In cartpole, the state consists of four continuous values: the cart’s position,
-# cart’s velocity, pole angle, and pole's angular velocity. So it will return 4
-# env.action_space.n = Actions agent can take, so 2 (left & right)
 
-# Making continous values into discrete
+# Define bins for each state variable
+n_bins = [6, 6, 6, 6]  # Example: 6 bins for each of the 4 state components. Modify as I go along
+
+# Initialize Q-table based on discretized state space
+q_table = np.zeros(n_bins + [env.action_space.n])
+# q_table = np.zeros(...) creates an empty table of estimated expected future values.
+# n_bins is a list that defines the number of discrete bins for each state variable. (i.e. 6 6 6 6)
+# + [env.action_space.n] is the actions, so 2
+# q_table.shape = (6, 6, 6, 6, 2)
+# So if State: [2, 3, 1, 4] and action = 0 (left), then
+# q_value = q_table[2, 3, 1, 4, 0]
+
+# Making continuous values into discrete
 def discretize_states(state, bins):
     # high gives the upper values of the state
     # = [gives highest possible value], 0.5 (all values above 0.5 are treated as 0.5 to avoid screwing over the table)
@@ -46,7 +56,7 @@ def discretize_states(state, bins):
     # round((bins[i] - 1) * ratios[i]):
     #     The round() function rounds the result to the nearest integer, giving us the closest bin. ex. 2.5 -> 3
     # for i in range(len(state)): This loops over each component of the state (e.g., cart position, velocity) and performs the above operation for each one.
-    new_state = [int(round((bin[i] - 1) * ratios[i])) for i in range(len(state))]
+    new_state = [int(round((bins[i] - 1) * ratios[i])) for i in range(len(state))]
 
     # max(0, new_state[i]):
     #
@@ -64,8 +74,10 @@ def discretize_states(state, bins):
 
 # Function to inject noise into the observation
 def inject_noise(state, noise_factor):
-    noise = np.random.randn(*state.shape) * noise_factor
-    return state + noise  # Add noise to the state observations
+    state_array = np.array(state)  # Convert state to a NumPy array
+    noise = np.random.randn(*state_array.shape) * noise_factor
+    return state_array + noise  # Add noise to the state observations
+
 
 # Strategy for balancing exploration and exploitation
 def choose_action(state, epsilon):
@@ -85,8 +97,20 @@ def choose_action(state, epsilon):
 # alpha: The learning rate, which decides how much the agent should adjust its previous knowledge based on new information. A higher value means it learns more from new experiences.
 # gamma: The discount factor, which tells the agent how important future rewards are compared to immediate rewards. A higher value means the agent cares more about long-term rewards than short-term gains.
 def update_q_table(q_table, state, action, reward, next_state, alpha, gamma):
+
+    # q_table[next_state], you get the Q-values for both actions (left and right) in the next state.
+    # q_table = (2, 1, -0.1, 0.1): [4.5, 3.2],  # Q-values for [left, right], so it chooses left (4.5) cause its better
+    # argmax returns the highest value, so 4.5
     best_next_action = np.argmax(q_table[next_state])
+
+    # q_table[state][action]: This is the Q-value for the current state and the action the agent took.
+    # alpha is the learning rate, a number between 0 and 1,  If alpha = 0.1, the Q-value will change by 10% of the new information.
     q_table[state][action] = q_table[state][action] + alpha * (
+        # reward: The immediate reward
+        # gamma is the discount factor (a number between 0 and 1) that determines how much future rewards matter.
+        # best_next_action is expected future reward
+        # Multiplying by gamma makes sure the future rewards are discounted (valued a bit less than immediate rewards).
+        # so this entire thing is the total expected reward
         reward + gamma * q_table[next_state][best_next_action] - q_table[state][action]
     )
 
@@ -94,11 +118,23 @@ def update_q_table(q_table, state, action, reward, next_state, alpha, gamma):
 for episode in range(num_episodes):
     # Reset the environment to start a new episode
     state, info = env.reset()
+    state = inject_noise(state, noise_factor) # Applying noise to the initial state
+    state = discretize_states(state, n_bins) # Converts continuous values into discrete categories (bins) to make them easier to manage.
+
+    epsilon = 0.1  # Exploration rate (e.g., 10% chance of taking a random action)
+    alpha = 0.1  # Learning rate (e.g., adjust Q-values by 10% of the new information)
+    gamma = 0.9  # Discount factor (e.g., future rewards are valued at 90% of their actual value)
 
     total_reward = 0  # Track total reward in each episode
     adjusted_reward = 0  # Initialize the adjusted reward
 
     for step in range(5000000):  # Increased to 500 steps per episode
+        # Strategy to balancing exploration and exploitation
+        action = choose_action(state, epsilon)
+
+        # Performing the action in the enviorment
+        next_state, reward, done, truncated, info = env.step(action)
+
         # Inject noise into the observations (optional)
         noisy_state = inject_noise(state, noise_factor)
 
@@ -106,7 +142,16 @@ for episode in range(num_episodes):
         action = env.action_space.sample()
 
         # Perform the action in the environment
-        state, reward, done, truncated, info = env.step(action)
+        next_state, reward, done, truncated, info = env.step(action)
+        # env.step(action): This is a method that tells the environment to execute the specified action.
+        # next state is the current situation of the enviorment to decide what to do next
+        # reward is immediate
+        # done checks if the episode is over
+        # truncated checks if the episode ends due to te time limit, confirms that its not because the agent failed
+
+        # Apply noise and discretize the next state
+        noisy_state = inject_noise(noisy_state, noise_factor)
+        next_state_discrete = discretize_states(next_state, n_bins)
 
         # Task switching based on the step count (rewards change after switch_threshold steps)
         if step < switch_threshold:
@@ -121,6 +166,13 @@ for episode in range(num_episodes):
             else:
                 # Penalize if the pole is at a steep angle (about to fall)
                 adjusted_reward = reward - 1
+
+
+        # Update the Q-table using Q-learning
+        update_q_table(q_table, state, action, adjusted_reward, next_state_discrete, alpha, gamma)
+
+        # Move to the next state
+        state = next_state_discrete
 
         # Accumulate the adjusted reward for the episode
         total_reward += adjusted_reward
