@@ -1,12 +1,14 @@
 # !pip install gymnasium
 # !pip install numpy
 # !pip install matplotlib
+import time
 
 import gymnasium as gym
 import numpy as np
 
 # Create the CartPole environment using Gymnasium
-env = gym.make('CartPole-v1')
+# env = gym.make('Acrobot-v1')
+env = gym.make('Acrobot-v1', render_mode='human')
 
 # Parameters
 switch_threshold = 10  # Step threshold to switch reward structures
@@ -126,6 +128,12 @@ gamma = 0.9  # Discount factor
 for episode in range(num_episodes):
     # Reset the environment to start a new episode
     state, info = env.reset()
+
+    # Visualize the environment
+    gym.make("CartPole-v1", render_mode="rgb_array")
+    env.render()
+    time.sleep(1)  # Adjust this to control the speed of the rendering
+
     state = inject_noise(state, noise_factor) # Applying noise to the initial state
     state = discretize_states(state, n_bins) # Converts continuous values into discrete categories (bins) to make them easier to manage.
 
