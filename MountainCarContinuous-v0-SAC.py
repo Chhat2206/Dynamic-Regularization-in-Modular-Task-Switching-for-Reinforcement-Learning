@@ -17,8 +17,8 @@ from stable_baselines3 import SAC
 import numpy as np
 
 # Create the MountainCarContinuous environment using Gymnasium
-env = gym.make('MountainCarContinuous-v0')
-
+# env = gym.make('MountainCarContinuous-v0')
+env = gym.make('MountainCarContinuous-v0', render_mode='human')
 # Initialize the SAC model
 model = SAC("MlpPolicy", env, verbose=1, learning_rate=0.001, gamma=0.99, buffer_size=1000000, batch_size=256)
 
