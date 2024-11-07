@@ -158,7 +158,7 @@ for episode in range(num_episodes):
 
         # Task switching based on the step count (rewards change after switch_threshold steps)
         if step < switch_threshold:
-            # Task 1: Use the standard reward (no changes)
+            # prototypesTask 1: Use the standard reward (no changes)
             adjusted_reward = reward
         else:
             # Task 2: Modify the reward based on the pole's angle (state[2] is the pole angle)

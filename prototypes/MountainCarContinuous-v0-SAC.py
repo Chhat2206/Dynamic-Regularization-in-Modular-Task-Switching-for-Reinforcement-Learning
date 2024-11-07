@@ -35,7 +35,7 @@ switch_threshold = 200  # Switch tasks after 200 steps (example)
 # Function to modify rewards based on task switching
 def adjust_reward(step, original_reward, position, velocity):
     if step < switch_threshold:
-        # Task 1: Reward is based on normal environment conditions
+        # prototypes: Reward is based on normal environment conditions
         adjusted_reward = original_reward
     else:
         # Task 2: Adjust reward differently based on conditions
