@@ -12,37 +12,6 @@ import time
 # Timing variables
 training_start_time = time.time()
 
-# Acrobot state vector explained (indices 0 to 5):
-
-# state[0]: Cosine of the angle of the first link (cos(theta1))
-# - Represents the horizontal position of the first link.
-# - Ranges from -1 to 1.
-
-# state[1]: Sine of the angle of the first link (sin(theta1))
-# - Represents the vertical position of the first link.
-# - Ranges from -1 to 1.
-
-# state[2]: Cosine of the angle of the second link (cos(theta2))
-# - Represents the horizontal position of the second link.
-# - Helps determine how the second link is swinging relative to the first.
-# - Ranges from -1 to 1.
-
-# state[3]: Sine of the angle of the second link (sin(theta2))
-# - Represents the vertical position of the second link.
-# - Helps complete the description of the second link's position.
-# - Ranges from -1 to 1.
-
-# state[4]: Angular velocity of the first link (theta1_dot)
-# - Represents how fast the first link is rotating.
-# - Positive values indicate one direction of rotation, negative values indicate the other.
-
-# state[5]: Angular velocity of the second link (theta2_dot)
-# - Represents how fast the second link is rotating.
-# - Positive values indicate one direction of rotation, negative values indicate the other.
-
-# Cosine and Sine values (state[0] to state[3]) describe the position of the two links in terms of a circle,
-# while angular velocities (state[4] and state[5]) describe how fast they are moving.
-
 # -------------------- Parameters --------------------
 
 # Create the environment
@@ -204,9 +173,16 @@ total_steps = 0
 performance_log = {goal: [] for goal in goals}
 performance_log["original"] = []  # Includes the original goal
 
+# Training metrics
+episode_rewards = []
+avg_rewards_per_100_episodes = []
+convergence_threshold = -100
+convergence_episode = None
+convergence_check_interval = 100
+
+
 for episode in range(num_episodes):
     episode_start_time = time.time()  # Track start time for each episode
-
     state, _ = env.reset()
     total_reward = 0
     done = False
@@ -254,6 +230,14 @@ for episode in range(num_episodes):
     episode_duration = episode_end_time - episode_start_time
     print(
         f"Current Goal: {current_goal}, Training Episode: {episode + 1}, Total Reward: {total_reward}, Epsilon: {epsilon}, Duration: {episode_duration:.2f} seconds")
+
+    # Check for convergence every 100 episodes
+    if episode % convergence_check_interval == 0 and episode > 0:
+        avg_reward = np.mean(episode_rewards[-convergence_check_interval:])
+        avg_rewards_per_100_episodes.append(avg_reward)
+        if avg_reward > convergence_threshold and convergence_episode is None:
+            convergence_episode = episode
+            print(f"Convergence reached at episode: {convergence_episode}")
 
 # Calculate total training time
 training_end_time = time.time()
