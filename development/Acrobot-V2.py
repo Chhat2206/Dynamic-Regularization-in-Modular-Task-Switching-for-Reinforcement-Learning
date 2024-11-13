@@ -62,13 +62,19 @@ class DQN(nn.Module):
         if len(x.shape) == 1: x = x.unsqueeze(0)  # Add a batch dimension, making it [1, input_dim]
 
         module_outputs = [torch.relu(layer(x)) for layer in self.fc1]
-        if self.reg_type == "batch_norm": module_outputs = [self.bn1[i](output) for i, output in enumerate(module_outputs)]
+        if self.reg_type == "batch_norm":
+            module_outputs = [
+                self.bn1[i](output) if output.size(0) > 1 else output
+                for i, output in enumerate(module_outputs)
+            ]
 
         x = torch.cat(module_outputs, dim=-1)  # Concatenate outputs from all the modules
-        if self.reg_type == "dropout": x = self.dropout(x)
+        if self.reg_type == "dropout":
+            x = self.dropout(x)
 
         x = torch.relu(self.fc2(x))
-        if self.reg_type == "batch_norm": x = self.bn2(x)
+        if self.reg_type == "batch_norm" and x.size(0) > 1:  # Only apply batch norm if batch size > 1
+            x = self.bn2(x)
 
         return self.fc3(x)
 
@@ -155,7 +161,11 @@ output_dim = env.action_space.n
 
 # For Pure Testing
 # Define the regularization techniques to experiment with
-regularization_types = ["dropout", "l1", "l2", "batch_norm"]
+# regularization_types = ["dropout", "l1", "l2", "batch_norm"]
+# regularization_types = ["dropout"]
+# regularization_types = ["l1"]
+# regularization_types = ["l2"]
+# regularization_types = ["batch_norm"]
 
 # Initialize an empty dictionary to store results for each regularization technique
 results = {
@@ -212,7 +222,7 @@ results = {
         "convergence_speed": [],
         "retention_score": [],
         "noise_resilience": [],
-        "task_rewards": {goal: [] for goal in goals}
+        "task_rewards": {goal: [] for goal in goals + ["original"]}
     }
     for reg_type in regularization_types
 }
@@ -228,19 +238,18 @@ for reg_type in regularization_types:
     replay_buffer = deque(maxlen=replay_buffer_size)
     episode_rewards = []  # Track rewards per episode
     avg_rewards_per_100_episodes = []
-    convergence_episode = None  # To record the first episode of convergence
     task_switch_count = 0
     epsilon = 1.0
 
     # Training episodes with task switching
     for episode in range(num_episodes):
+        start_time = time.time()  # Track time per episode
         state, _ = env.reset()
         total_reward = 0
         done = False
-        current_goal = "original" if not use_custom_goals or episode < 100 or episode >= num_episodes - 100 else random.choice(
-            goals)
-        if current_goal != "original":
-            task_switch_count += 1
+        current_goal = "original" if not use_custom_goals or episode < 100 or episode >= num_episodes - 100 else random.choice(goals)
+        if current_goal != "original": task_switch_count += 1
+
         while not done:
             action = q_network(torch.tensor(state, dtype=torch.float32)).argmax().item() if random.random() > epsilon else env.action_space.sample()
             next_state, reward, done, _, _ = env.step(action)
@@ -249,13 +258,22 @@ for reg_type in regularization_types:
             state = next_state
             total_reward += reward
             train_dqn(q_network, target_network, optimizer, reg_type)
-            if episode % target_update_frequency == 0:
-                target_network.load_state_dict(q_network.state_dict())
+            if episode % target_update_frequency == 0: target_network.load_state_dict(q_network.state_dict()) # Periodically update the target network
         epsilon = max(min_epsilon, epsilon * epsilon_decay)
         episode_rewards.append(total_reward)
         results[reg_type]["task_rewards"][current_goal].append(total_reward)
 
-        # Evaluate agent after training
+        # Print progress every episode
+        elapsed_time = time.time() - start_time
+        print(f"Episode: {episode + 1}/{num_episodes}, Goal: {current_goal}, Total Reward: {total_reward}, Epsilon: {epsilon:.3f}, Time: {elapsed_time:.2f} seconds")
+
+        # Log every 100 episodes for tracking average reward
+        if (episode + 1) % 100 == 0:
+            avg_reward_last_100 = np.mean(episode_rewards[-100:])
+            avg_rewards_per_100_episodes.append(avg_reward_last_100)
+            print(f"Episode {episode + 1}: Average Reward (last 100 episodes): {avg_reward_last_100}")
+
+    # Evaluation after training
     avg_eval_reward = evaluate_agent(env, num_episodes=3, goal="original")
     results[reg_type]["rewards"].append(avg_eval_reward)
 
