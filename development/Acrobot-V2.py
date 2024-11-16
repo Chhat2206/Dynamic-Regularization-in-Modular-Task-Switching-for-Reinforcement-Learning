@@ -11,28 +11,32 @@ import random
 from collections import deque
 import time
 
-# -------------------- Parameters --------------------
-
 # Create the environment
-env = gym.make("Acrobot-v1", render_mode='Human')
+env = gym.make("Acrobot-v1")
 
 # Set goals for custom task-switching
-use_custom_goals = True  # Set False to train all episodes under the original goal in all episodes
+use_custom_goals = False  # Set False to train all episodes under the original goal in all episodes
 goals = ["quick_recovery", "periodic_swing", "maintain_balance"]
 
 # Hyperparameters
+
 learning_rate = 0.0001  # Slightly lower for more stable learning, OG: 0.00025 is REALLY BAD
 gamma = 0.99
 epsilon = 1.0  # Exploration rate
-epsilon_decay = 0.996 # Slower decay from 0.995 to allow more exploration
+epsilon_decay = 0.99 # Slower decay from 0.995 to allow more exploration
 min_epsilon = 0.01
-batch_size = 256  # Recommended 128 or 256, prof says 32 has valuable research
+batch_size = 128  # Recommended 128 or 256, prof says 32 has valuable research
 replay_buffer_size = 100000  # Increased to allow more diverse experiences
 replay_buffer = deque(maxlen=replay_buffer_size)
 num_episodes = 500  # Increased number of episodes, OG: 500
-target_update_frequency = 1000
+target_update_frequency = 500
 convergence_threshold = -85
 eval_interval = 50
+
+# batch_size = 64
+# learning_rate = 0.00017734853090073082
+# gamma = 0.9416948627944488
+# epsilon_decay = 0.9873164690409039
 
 # Timing variables
 training_start_time = time.time()
@@ -188,33 +192,16 @@ def select_action(state, epsilon, q_network, noise_level=0.1):
             q_values = q_network(noisy_state)
             return int(torch.argmax(q_values).item())  # Exploitation
 
-# -------------------- Training Loop --------------------
-
 avg_rewards_per_100_episodes = []
 original_phase_rewards = []
 task_switching_phase_rewards = []
 
 performance_log = {goal: {"rewards": [], "convergence_speed": []} for goal in goals}
 performance_log["original"] = {"rewards": [], "convergence_speed": []}
-convergence_log = {goal: [] for goal in goals}
 window_size = 10  # Size for moving average window
 task_switch_rewards = []
 task_switch_count = 0
 total_steps = 0
-
-# Function to determine if agent has converged
-def is_converged(rewards, threshold):
-    if len(rewards) < window_size:
-        return False
-    return np.mean(rewards[-window_size:]) >= threshold
-
-
-# After training, analyze metrics
-for goal in performance_log:
-    avg_reward = np.mean(performance_log[goal]["rewards"])
-    avg_convergence_speed = np.mean(performance_log[goal]["convergence_speed"]) if performance_log[goal][
-        "convergence_speed"] else None
-    print(f"Goal: {goal}, Average Reward: {avg_reward}, Average Convergence Speed: {avg_convergence_speed}")
 
 results = {
     reg_type: {
@@ -227,29 +214,48 @@ results = {
     for reg_type in regularization_types
 }
 
-# Wrapper for training and logging results for each regularization type
+# Function to determine if agent has converged
+def is_converged(rewards, threshold, window_size=10):
+    if len(rewards) < window_size:
+        return False
+    return np.mean(rewards[-window_size:]) >= threshold
+
+# Dictionary to track convergence speed for each task
+convergence_log = {goal: [] for goal in goals + ["original"]}
+
+# Number of episodes taken to converge after switching to a task
+current_task_episode_count = {goal: 0 for goal in goals + ["original"]}
+
+# Training episodes with task switching
 for reg_type in regularization_types:
     print(f"\nTraining with Regularization Type: {reg_type}")
 
-    # Initialize a new model with the specified regularization type
+    # Initialize model, target, optimizer, and replay buffer
     q_network = DQN(env.observation_space.shape[0], env.action_space.n, reg_type=reg_type)
     target_network = DQN(env.observation_space.shape[0], env.action_space.n, reg_type=reg_type)
-    optimizer = optim.Adam(q_network.parameters(), lr=learning_rate, weight_decay=1e-4 if reg_type == "l2" else 0) # Choose optimizer based on the regularization type
+    optimizer = optim.Adam(q_network.parameters(), lr=learning_rate, weight_decay=1e-4 if reg_type == "l2" else 0)
     replay_buffer = deque(maxlen=replay_buffer_size)
-    episode_rewards = []  # Track rewards per episode
-    avg_rewards_per_100_episodes = []
-    task_switch_count = 0
-    epsilon = 1.0
 
-    # Training episodes with task switching
+    epsilon = 1.0
+    episode_rewards = []  # Track rewards per episode
+
     for episode in range(num_episodes):
-        start_time = time.time()  # Track time per episode
         state, _ = env.reset()
         total_reward = 0
         done = False
-        current_goal = "original" if not use_custom_goals or episode < 100 or episode >= num_episodes - 100 else random.choice(goals)
-        if current_goal != "original": task_switch_count += 1
 
+        # Determine current task
+        if not use_custom_goals or episode < 100 or episode >= num_episodes - 100:
+            current_goal = "original"
+        else:
+            current_goal = random.choice(goals)
+
+        # Reset convergence counter if switching to a new task
+        if episode > 0 and current_goal != previous_goal:
+            current_task_episode_count[current_goal] = 0
+        previous_goal = current_goal
+
+        # Run the episode
         while not done:
             action = q_network(torch.tensor(state, dtype=torch.float32)).argmax().item() if random.random() > epsilon else env.action_space.sample()
             next_state, reward, done, _, _ = env.step(action)
@@ -258,30 +264,32 @@ for reg_type in regularization_types:
             state = next_state
             total_reward += reward
             train_dqn(q_network, target_network, optimizer, reg_type)
-            if episode % target_update_frequency == 0: target_network.load_state_dict(q_network.state_dict()) # Periodically update the target network
+
+            # Update the target network periodically
+            if episode % target_update_frequency == 0:
+                target_network.load_state_dict(q_network.state_dict())
+
+        # Decay epsilon
         epsilon = max(min_epsilon, epsilon * epsilon_decay)
         episode_rewards.append(total_reward)
         results[reg_type]["task_rewards"][current_goal].append(total_reward)
 
+        # Track the number of episodes taken to converge
+        current_task_episode_count[current_goal] += 1
+
+        # Check if the current task has converged using task-specific reward history
+        if is_converged(results[reg_type]["task_rewards"][current_goal][-window_size:], convergence_threshold):
+            convergence_log[current_goal].append(current_task_episode_count[current_goal])
+            current_task_episode_count[current_goal] = 0  # Reset episode counter for next convergence tracking
+
         # Print progress every episode
-        elapsed_time = time.time() - start_time
-        print(f"Episode: {episode + 1}/{num_episodes}, Goal: {current_goal}, Total Reward: {total_reward}, Epsilon: {epsilon:.3f}, Time: {elapsed_time:.2f} seconds")
+        print(f"Episode: {episode + 1}/{num_episodes}, Goal: {current_goal}, Total Reward: {total_reward}, Epsilon: {epsilon:.3f}")
 
-        # Log every 100 episodes for tracking average reward
-        if (episode + 1) % 100 == 0:
-            avg_reward_last_100 = np.mean(episode_rewards[-100:])
-            avg_rewards_per_100_episodes.append(avg_reward_last_100)
-            print(f"Episode {episode + 1}: Average Reward (last 100 episodes): {avg_reward_last_100}")
+    # After training, analyze convergence speed for each task
+    for goal in convergence_log:
+        avg_convergence_speed = np.mean(convergence_log[goal]) if convergence_log[goal] else None
+        print(f"Goal: {goal}, Average Convergence Speed: {avg_convergence_speed} episodes")
 
-    # Evaluation after training
-    avg_eval_reward = evaluate_agent(env, num_episodes=3, goal="original")
-    results[reg_type]["rewards"].append(avg_eval_reward)
-
-    # Calculate and store the average reward every 100 episodes
-    if (episode + 1) % 100 == 0:
-        avg_reward_last_100 = np.mean(episode_rewards[-100:])
-        avg_rewards_per_100_episodes.append(avg_reward_last_100)
-        print(f"Episode {episode + 1}: Average Reward (last 100 episodes): {avg_reward_last_100}")
 
 # Training time tracking
 training_end_time = time.time()
@@ -292,29 +300,39 @@ torch.save(q_network.state_dict(), "dqn_acrobot_model.pth")
 with open("performance_log.pkl", "wb") as f:
     pickle.dump(results, f)
 
-# Plot cumulative rewards per episode (fine-grained reward tracking)
-plt.plot(episode_rewards, label='Episode Rewards')
-plt.xlabel('Episodes')
-plt.ylabel('Total Reward')
-plt.title('Training Progress (Episode Rewards)')
-plt.legend()
-plt.show()
+# Plotting average rewards per task per regularization type
+for reg_type in regularization_types:
+    plt.figure(figsize=(10, 6))
+    for goal in goals + ["original"]:
+        plt.plot(results[reg_type]["task_rewards"][goal], label=f"{goal} Rewards ({reg_type})")
+    plt.xlabel("Episodes")
+    plt.ylabel("Total Reward")
+    plt.title(f"Average Rewards per Task ({reg_type})")
+    plt.legend()
+    plt.show()
 
-# Plot the 100-episode moving average to track performance trend over time
-plt.figure(figsize=(10, 6))
-plt.plot(avg_rewards_per_100_episodes, label="Average Reward per 100 Episodes")
-plt.xlabel("100-Episode Intervals")
-plt.ylabel("Average Reward")
-plt.title("Average Reward Every 100 Episodes During Training")
-plt.legend()
-plt.show()
-
-
+# Improved Plotting of Average Convergence Speed per Task per Regularization Type
+for reg_type in regularization_types:
+    avg_convergence_speeds = [np.mean(convergence_log[goal]) for goal in goals + ["original"] if len(convergence_log[goal]) > 0]
+    plt.figure(figsize=(10, 6))
+    plt.bar(goals + ["original"], avg_convergence_speeds)
+    plt.xlabel("Tasks")
+    plt.ylabel("Average Episodes to Converge")
+    plt.title(f"Convergence Speed per Task ({reg_type})")
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
 
 # Plot task-specific average rewards per regularization type
+print("\n--- Evaluation Phase ---")
 for reg_type in regularization_types:
-    avg_task_rewards = {goal: np.mean(results[reg_type]["task_rewards"][goal]) for goal in goals}
-    print(f"\n{reg_type} Summary - Avg Rewards per Goal: {avg_task_rewards}")
+    print(f"Evaluating model with Regularization Type: {reg_type}")
+    avg_rewards_per_goal = {}
+    for goal in goals + ["original"]:
+        avg_reward = evaluate_agent(env, num_episodes=5, goal=goal)
+        avg_rewards_per_goal[goal] = avg_reward
+        results[reg_type]["retention_score"].append(avg_reward)
+    print(f"Avg Reward per Goal for {reg_type}: {avg_rewards_per_goal}")
 
 env.close()
 
@@ -324,55 +342,104 @@ env.close()
 q_network.load_state_dict(torch.load("dqn_acrobot_model.pth"))
 
 # Define the number of episodes and maximum steps for testing
-test_episodes = 20
+test_episodes = 50
 max_steps = 500  # Limit to prevent long runs
+
+# Different noise levels for evaluating noise resilience
+noise_levels = [0.0, 0.1, 0.2, 0.4]
 
 # Timing for testing phase
 testing_start_time = time.time()
 
-# Define the number of episodes and maximum steps for testing
-test_episodes = 20
-max_steps = 500  # Limit to prevent long runs
-eval_rewards = []
+# Initialize a dictionary to store results for different noise levels
+testing_results = {
+    "noise_level": [],
+    "average_reward": [],
+    "std_reward": [],
+    "average_duration": []
+}
 
-# Testing loop (no training, only evaluation against regular Acrobot goal)
-for episode in range(test_episodes):
-    episode_start_time = time.time()  # Start time for each test episode
-    state, _ = env.reset()  # Initialize the environment and get the starting state
-    total_reward = 0  # Initialize the total reward counter
-    done = False  # Boolean to check if the episode is complete
-    step_count = 0  # Step counter to limit maximum steps per episode
+# Improved Testing loop
+for noise_level in noise_levels:
+    print(f"\nTesting with Noise Level: {noise_level}")
+    eval_rewards = []
+    episode_durations = []
 
-    while not done and step_count < max_steps:
-        with torch.no_grad():  # Ensure no training happens during testing
-            # Use the model to select an action without exploration
-            action = select_action(state, epsilon=0, q_network=q_network, noise_level=0)  # Greedy policy
-            next_state, reward, done, _, _ = env.step(action)
+    for episode in range(test_episodes):
+        episode_start_time = time.time()  # Start time for each test episode
+        state, _ = env.reset()  # Initialize the environment and get the starting state
+        total_reward = 0  # Initialize the total reward counter
+        done = False  # Boolean to check if the episode is complete
+        step_count = 0  # Step counter to limit maximum steps per episode
 
-            # Optionally add noise to the next state (for testing noise resilience)
-            noisy_state = add_noise_to_state(next_state, noise_level=0.4)
-            state = noisy_state
-            total_reward += reward
-            step_count += 1
+        while not done and step_count < max_steps:
+            with torch.no_grad():  # Ensure no training happens during testing
+                # Use the model to select an action without exploration
+                action = select_action(state, epsilon=0, q_network=q_network, noise_level=noise_level)  # Greedy policy
+                next_state, reward, done, _, _ = env.step(action)
 
-    # Track total rewards for evaluation
-    eval_rewards.append(total_reward)
-    episode_end_time = time.time()
-    episode_duration = episode_end_time - episode_start_time
-    print(f"Test Episode: {episode + 1}, Total Reward: {total_reward}, Duration: {episode_duration:.2f} seconds")
+                # Optionally add noise to the next state (for testing noise resilience)
+                state = add_noise_to_state(next_state, noise_level)
+                total_reward += reward
+                step_count += 1
 
-    # Evaluate and log every eval_interval episodes
-    if (episode + 1) % eval_interval == 0:
-        avg_reward = np.mean(eval_rewards)
-        results[reg_type]["rewards"].append(avg_reward)  # Append to the specific reg_type rewards
-        eval_rewards = []  # Reset eval_rewards for the next interval
-        print(f"Evaluation after {episode + 1} episodes, Avg Reward: {avg_reward}")
+        # Track total rewards and duration for evaluation
+        eval_rewards.append(total_reward)
+        episode_end_time = time.time()
+        episode_duration = episode_end_time - episode_start_time
+        episode_durations.append(episode_duration)
 
+        # Print progress for each episode
+        print(f"Test Episode: {episode + 1}, Total Reward: {total_reward}, Duration: {episode_duration:.2f} seconds")
+
+    # Calculate statistics
+    avg_reward = np.mean(eval_rewards)
+    std_reward = np.std(eval_rewards)
+    avg_duration = np.mean(episode_durations)
+
+    # Append to results
+    testing_results["noise_level"].append(noise_level)
+    testing_results["average_reward"].append(avg_reward)
+    testing_results["std_reward"].append(std_reward)
+    testing_results["average_duration"].append(avg_duration)
+
+    # Print summary for current noise level
+    print(f"\nSummary for Noise Level {noise_level}:")
+    print(f"Average Reward: {avg_reward}")
+    print(f"Standard Deviation of Reward: {std_reward}")
+    print(f"Average Episode Duration: {avg_duration:.2f} seconds")
 
 # Calculate total testing time
 testing_end_time = time.time()
 testing_duration = testing_end_time - testing_start_time
-print(f"Total Testing Time: {testing_duration:.2f} seconds")
+print(f"\nTotal Testing Time: {testing_duration:.2f} seconds")
 
-# Close the environment after training
+# Plotting testing results for different noise levels
+plt.figure(figsize=(12, 6))
+
+# Plot average rewards for each noise level
+plt.subplot(1, 3, 1)
+plt.plot(testing_results["noise_level"], testing_results["average_reward"], marker='o', linestyle='-', color='b')
+plt.xlabel("Noise Level")
+plt.ylabel("Average Reward")
+plt.title("Average Reward vs. Noise Level")
+
+# Plot standard deviation of rewards for each noise level
+plt.subplot(1, 3, 2)
+plt.plot(testing_results["noise_level"], testing_results["std_reward"], marker='o', linestyle='-', color='r')
+plt.xlabel("Noise Level")
+plt.ylabel("Reward Standard Deviation")
+plt.title("Reward Std Dev vs. Noise Level")
+
+# Plot average episode duration for each noise level
+plt.subplot(1, 3, 3)
+plt.plot(testing_results["noise_level"], testing_results["average_duration"], marker='o', linestyle='-', color='g')
+plt.xlabel("Noise Level")
+plt.ylabel("Average Duration (seconds)")
+plt.title("Average Duration vs. Noise Level")
+
+plt.tight_layout()
+plt.show()
+
+# Close the environment after testing
 env.close()
