@@ -11,21 +11,20 @@ print(f"Using device: {device}")
 
 # Define the DQN network structure
 class DQN(nn.Module):
-    def __init__(self, input_dim, output_dim, num_modules=4):
+    def __init__(self, input_dim, output_dim):
         super(DQN, self).__init__()
-        self.fc1 = nn.ModuleList([nn.Linear(input_dim, 128) for _ in range(num_modules)])
-        self.fc2 = nn.Linear(128 * num_modules, 128)  # Adjust for concatenated outputs
+        self.fc1 = nn.Linear(input_dim, 128)  # Single layer
+        self.fc2 = nn.Linear(128, 128)
         self.fc3 = nn.Linear(128, output_dim)
 
     def forward(self, x):
-        if len(x.shape) == 1:  # Add a batch dimension if input is a single state
+        if len(x.shape) == 1:
             x = x.unsqueeze(0)
-        # Process input through each module in fc1
-        module_outputs = [torch.relu(layer(x)) for layer in self.fc1]
-        x = torch.cat(module_outputs, dim=-1)  # Concatenate outputs
+        x = torch.relu(self.fc1(x))
         x = torch.relu(self.fc2(x))
         x = self.fc3(x)
         return x
+
 
 
 # Function to add noise to the state
@@ -43,7 +42,7 @@ def select_action(state, q_network, noise_level=0.0):
     return action
 
 # Load the environment
-env = gym.make("Acrobot-v1")
+env = gym.make("Acrobot-v1", render_mode='human')
 
 # Load the trained model
 input_dim = env.observation_space.shape[0]
