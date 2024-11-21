@@ -1,4 +1,4 @@
-!pip install gymnasium
+#!pip install gymnasium
 
 import pickle
 from matplotlib import pyplot as plt
@@ -10,12 +10,16 @@ import torch.optim as optim
 import random
 from collections import deque
 import time
+import pandas as pd
 
 # Create the environment
 env = gym.make("Acrobot-v1")
 
 # Set goals for custom task-switching
 use_custom_goals = True  # Set False to train all episodes under the original goal in all episodes
+is_rq1 = True   # Set this to True to evaluate RQ1, and automatically set RQ2 to False
+is_rq2 = not is_rq1
+mode = "none"  # Options are "none", "structured_task_switching", "randomized_task_switching"
 goals = ["quick_recovery", "periodic_swing", "maintain_balance"]
 
 # Hyperparameters
@@ -32,6 +36,8 @@ num_episodes = 500  # Increased number of episodes, OG: 500
 target_update_frequency = 500
 convergence_threshold = -100
 eval_interval = 50
+# Training episodes with task switching
+parameter_noise_stddev = 0.1  # Standard deviation for parameter noise (for RQ2)
 
 # Timing variables
 training_start_time = time.time()
@@ -160,7 +166,7 @@ output_dim = env.action_space.n
 
 # For Pure Testing
 # Define the regularization techniques to experiment with
-# regularization_types = ["dropout", "l1", "l2", "batch_norm"]
+regularization_types = ["dropout", "l1", "l2", "batch_norm"]
 # regularization_types = ["dropout"]
 # regularization_types = ["l1"]
 # regularization_types = ["l2"]
@@ -215,6 +221,15 @@ def is_converged(rewards, threshold, window_size=10):
         return False
     return np.mean(rewards[-window_size:]) >= threshold
 
+def add_parameter_noise(model, stddev=0.1):
+    with torch.no_grad():  # We don't want to learn or change weights permanently here
+        for param in model.parameters():
+            if param.requires_grad:  # Only change weights that are trainable
+                # Add a small random value (noise) to each weight
+                noise = torch.normal(mean=0.0, std=stddev, size=param.size()).to(param.device)
+                param.add_(noise)  # Apply the noise to the parameter
+
+
 # Dictionary to track convergence speed for each task
 convergence_log = {goal: [] for goal in goals + ["original"]}
 
@@ -235,6 +250,7 @@ for reg_type in regularization_types:
 
     epsilon = 1.0
     episode_rewards = []  # Track rewards per episode
+    task_to_reg = {} # Dictonary to store the task for regularized task switching
 
     for episode in range(num_episodes):
         state, _ = env.reset()
@@ -247,6 +263,22 @@ for reg_type in regularization_types:
         else:
             current_goal = random.choice(goals)
 
+        if mode == "none":
+            reg_type = reg_type
+        elif mode == "structured_task_switching":
+            if current_goal not in task_to_reg:
+                task_to_reg[current_goal] = random.choice(regularization_types)
+                print(f"Regularization Type for Task '{current_goal}' is '{task_to_reg[current_goal]}'")
+            reg_type = task_to_reg[current_goal]
+        elif mode == "randomized_task_switching":
+            reg_type = random.choice(regularization_types)
+        else:
+            raise ValueError(f"Unrecognized mode: {mode}")
+
+        # Add parameter noise only if we are evaluating RQ2
+        if is_rq2:
+            add_parameter_noise(q_network, parameter_noise_stddev)
+
         # Reset convergence counter if switching to a new task
         if episode > 0 and current_goal != previous_goal:
             current_task_episode_count[current_goal] = 0
@@ -254,9 +286,18 @@ for reg_type in regularization_types:
 
         # Run the episode
         while not done:
+            # Add noise to state during training if evaluating RQ2
+            if is_rq2:
+                state = add_noise_to_state(state, noise_level=parameter_noise_stddev)
+
             action = q_network(torch.tensor(state, dtype=torch.float32).to('cuda')).argmax().item() if random.random() > epsilon else env.action_space.sample()
             next_state, reward, done, _, _ = env.step(action)
             reward = get_goal_reward(shape_reward(state, next_state, reward), state, current_goal)
+
+            # Add noise to next state if evaluating RQ2
+            if is_rq2:
+                next_state = add_noise_to_state(next_state, noise_level=parameter_noise_stddev)
+
             replay_buffer.append((state, action, reward, next_state, done))
             state = next_state
             total_reward += reward
@@ -339,6 +380,11 @@ for reg_type in regularization_types:
 print("\n--- Evaluation Phase ---")
 for reg_type in regularization_types:
     print(f"Evaluating model with Regularization Type: {reg_type}")
+
+    if is_rq2:
+        # Add parameter noise before evaluation if we are assessing RQ2
+        add_parameter_noise(q_network, parameter_noise_stddev)
+
     avg_rewards_per_goal = {}
     for goal in goals + ["original"]:
         avg_reward = evaluate_agent(env, num_episodes=5, goal=goal)
@@ -347,6 +393,7 @@ for reg_type in regularization_types:
     print(f"Avg Reward per Goal for {reg_type}: {avg_rewards_per_goal}")
 
 env.close()
+
 
 # -------------------- Testing Phase --------------------
 
@@ -450,72 +497,154 @@ print("Average Rewards:", testing_results["average_reward"])
 print("Standard Deviations of Rewards:", testing_results["std_reward"])
 print("Average Episode Durations:", testing_results["average_duration"])
 
-# Plotting Reward Curves for Different Regularization Techniques
-plt.figure(figsize=(10, 6))
-for reg_type in regularization_types:
-    for goal in goals + ["original"]:
-        plt.plot(results[reg_type]["task_rewards"][goal], label=f"{goal} ({reg_type})")
-plt.xlabel("Episodes")
-plt.ylabel("Total Reward")
-plt.title("Reward Curves for Different Regularization Techniques")
-plt.legend()
-plt.tight_layout()
-plt.grid(True)
-plt.show()
+# Save metrics into an Excel file
+output_file = "training_testing_metrics_summary.xlsx"
+with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
 
+    # Metrics Collection Variables
+    window_size = 20  # Rolling window size for averaging metrics
 
-# Plotting Average Convergence Speed per Task
-for reg_type in regularization_types:
-    valid_goals = [goal for goal in goals + ["original"] if len(convergence_log[goal]) > 0]
-    avg_convergence_speeds = [np.mean(convergence_log[goal]) for goal in valid_goals]
-    std_devs = [np.std(convergence_log[goal]) for goal in valid_goals]
+    # 1. Average Reward Over Time Across Tasks
+    average_rewards_data = []
+    for reg_type in regularization_types:
+        for goal in goals + ["original"]:
+            rewards = results[reg_type]["task_rewards"][goal]
+            rolling_avg = [np.mean(rewards[max(0, i - window_size):i + 1]) for i in range(len(rewards))]
+            for i, avg_reward in enumerate(rolling_avg):
+                average_rewards_data.append({
+                    "Mode": mode,
+                    "Regularization Type": reg_type,
+                    "Task": goal,
+                    "Episode": i + 1,
+                    "Average Reward (Rolling Window)": avg_reward
+                })
 
-    if len(valid_goals) > 0:
-        plt.figure(figsize=(10, 6))
-        plt.bar(valid_goals, avg_convergence_speeds, yerr=std_devs, capsize=5, alpha=0.7)
-        plt.xlabel("Tasks")
-        plt.ylabel("Average Episodes to Converge")
-        plt.title(f"Convergence Speed per Task with Error Bars ({reg_type})")
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        plt.grid(axis='y')
-        plt.show()
-    else:
-        print(f"No valid convergence data for Regularization Type: {reg_type}")
+            # Plot Average Reward Over Time
+            plt.plot(rolling_avg, label=f"{goal} ({reg_type})")
 
+    plt.xlabel("Episodes")
+    plt.ylabel("Average Reward (Rolling Window)")
+    plt.title(f"Average Reward Trends per Task (Mode: {mode})")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
 
-# Plotting testing results for different noise levels
-plt.figure(figsize=(15, 5))
+    # Convert to DataFrame and write to Excel
+    average_rewards_df = pd.DataFrame(average_rewards_data)
+    average_rewards_df.to_excel(writer, sheet_name="Average Rewards", index=False)
 
-# Plot average rewards for each noise level
-plt.subplot(1, 3, 1)
-plt.plot(testing_results["noise_level"], testing_results["average_reward"], marker='o', linestyle='-', color='b', label='Avg Reward')
-plt.xlabel("Noise Level")
-plt.ylabel("Average Reward")
-plt.title("Average Reward vs. Noise Level")
-plt.legend()  # Add legend to indicate the plotted line
-plt.grid(True)
+    # 2. Convergence Speed per Task
+    convergence_speed_data = []
+    convergence_threshold = -100  # Reward threshold for convergence
+    for reg_type in regularization_types:
+        for goal in goals + ["original"]:
+            task_rewards = results[reg_type]["task_rewards"][goal]
+            convergence_times = []
+            for i in range(len(task_rewards)):
+                if np.mean(task_rewards[max(0, i - window_size):i + 1]) >= convergence_threshold:
+                    convergence_times.append(i + 1)
+                    break  # Record the first convergence point
 
-# Plot standard deviation of rewards for each noise level
-plt.subplot(1, 3, 2)
-plt.plot(testing_results["noise_level"], testing_results["std_reward"], marker='o', linestyle='-', color='r', label='Std Dev of Reward')
-plt.xlabel("Noise Level")
-plt.ylabel("Reward Standard Deviation")
-plt.title("Reward Std Dev vs. Noise Level")
-plt.legend()  # Add legend to indicate the plotted line
-plt.grid(True)
+            if convergence_times:
+                avg_convergence = np.mean(convergence_times)
+                std_convergence = np.std(convergence_times)
+                convergence_speed_data.append({
+                    "Mode": mode,
+                    "Regularization Type": reg_type,
+                    "Task": goal,
+                    "Average Episodes to Converge": avg_convergence,
+                    "Std Dev": std_convergence
+                })
 
-# Plot average episode duration for each noise level
-plt.subplot(1, 3, 3)
-plt.plot(testing_results["noise_level"], testing_results["average_duration"], marker='o', linestyle='-', color='g', label='Avg Duration')
-plt.xlabel("Noise Level")
-plt.ylabel("Average Duration (seconds)")
-plt.title("Average Duration vs. Noise Level")
-plt.legend()  # Add legend to indicate the plotted line
-plt.grid(True)
+                # Plotting convergence times
+                plt.bar(goal, avg_convergence, yerr=std_convergence, capsize=5, label=f"{goal} ({reg_type})")
 
-plt.tight_layout()  # Ensure proper spacing between subplots
-plt.show()
+    plt.xlabel("Tasks")
+    plt.ylabel("Average Episodes to Converge")
+    plt.title(f"Convergence Speed per Task (Mode: {mode})")
+    plt.legend()
+    plt.grid(axis='y')
+    plt.show()
+
+    # Convert to DataFrame and write to Excel
+    convergence_speed_df = pd.DataFrame(convergence_speed_data)
+    convergence_speed_df.to_excel(writer, sheet_name="Convergence Speed", index=False)
+
+    # 3. Reward Variance During Training
+    reward_variances_data = []
+    for reg_type in regularization_types:
+        for goal in goals + ["original"]:
+            task_rewards = results[reg_type]["task_rewards"][goal]
+            rolling_std = [np.std(task_rewards[max(0, i - window_size):i + 1]) for i in range(len(task_rewards))]
+            for i, std_reward in enumerate(rolling_std):
+                reward_variances_data.append({
+                    "Mode": mode,
+                    "Regularization Type": reg_type,
+                    "Task": goal,
+                    "Episode": i + 1,
+                    "Reward Std Dev (Rolling Window)": std_reward
+                })
+
+            # Plot Reward Variance
+            plt.plot(rolling_std, label=f"{goal} ({reg_type})")
+
+    plt.xlabel("Episodes")
+    plt.ylabel("Reward Standard Deviation (Rolling Window)")
+    plt.title(f"Reward Variance Trends per Task (Mode: {mode})")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+    # Convert to DataFrame and write to Excel
+    reward_variances_df = pd.DataFrame(reward_variances_data)
+    reward_variances_df.to_excel(writer, sheet_name="Reward Variance", index=False)
+
+    # 4. Testing Results for Different Noise Levels
+    # Creating DataFrame for testing results collected previously
+    testing_results_df = pd.DataFrame({
+        "Mode": [mode] * len(testing_results["noise_level"]),
+        "Noise Level": testing_results["noise_level"],
+        "Average Reward": testing_results["average_reward"],
+        "Reward Std Dev": testing_results["std_reward"],
+        "Average Duration (seconds)": testing_results["average_duration"]
+    })
+
+    testing_results_df.to_excel(writer, sheet_name="Testing Results Summary", index=False)
+
+    # Plotting Testing Results
+    plt.figure(figsize=(15, 5))
+
+    # Plot average rewards for each noise level
+    plt.subplot(1, 3, 1)
+    plt.plot(testing_results["noise_level"], testing_results["average_reward"], marker='o', linestyle='-', color='b', label='Avg Reward')
+    plt.xlabel("Noise Level")
+    plt.ylabel("Average Reward")
+    plt.title(f"Average Reward vs. Noise Level (Mode: {mode})")
+    plt.legend()
+    plt.grid(True)
+
+    # Plot standard deviation of rewards for each noise level
+    plt.subplot(1, 3, 2)
+    plt.plot(testing_results["noise_level"], testing_results["std_reward"], marker='o', linestyle='-', color='r', label='Std Dev of Reward')
+    plt.xlabel("Noise Level")
+    plt.ylabel("Reward Standard Deviation")
+    plt.title(f"Reward Std Dev vs. Noise Level (Mode: {mode})")
+    plt.legend()
+    plt.grid(True)
+
+    # Plot average episode duration for each noise level
+    plt.subplot(1, 3, 3)
+    plt.plot(testing_results["noise_level"], testing_results["average_duration"], marker='o', linestyle='-', color='g', label='Avg Duration')
+    plt.xlabel("Noise Level")
+    plt.ylabel("Average Duration (seconds)")
+    plt.title(f"Average Duration vs. Noise Level (Mode: {mode})")
+    plt.legend()
+    plt.grid(True)
+
+    plt.tight_layout()
+    plt.show()
+
+print(f"All metrics have been successfully saved to {output_file}")
 
 # Close the environment after testing
 env.close()
