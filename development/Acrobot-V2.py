@@ -11,6 +11,7 @@ import random
 from collections import deque
 import time
 import pandas as pd
+from scipy import stats
 
 # Create the environment
 env = gym.make("Acrobot-v1")
@@ -49,6 +50,7 @@ def shape_reward(state, next_state, reward):
         reward += 0.5  # Provide a small positive reward for progress
     return reward
 
+
 # Neural network for DQN
 class DQN(nn.Module):
     def __init__(self, input_dim, output_dim, reg_type=None, num_modules=4):
@@ -56,17 +58,30 @@ class DQN(nn.Module):
         self.reg_type = reg_type
         self.num_modules = num_modules
 
+        # First fully connected layer
         self.fc1 = nn.ModuleList([nn.Linear(input_dim, 128) for _ in range(num_modules)])
-        if reg_type == "batch_norm": self.bn1 = nn.ModuleList([nn.BatchNorm1d(128) for _ in range(num_modules)])
+
+        # Batch normalization layers, initialize them for all modules but use conditionally
+        self.bn1 = nn.ModuleList([nn.BatchNorm1d(128) for _ in range(num_modules)])
+
+        # Second fully connected layer
         self.fc2 = nn.Linear(128 * num_modules, 128)
-        if reg_type == "batch_norm": self.bn2 = nn.BatchNorm1d(128)
+
+        # Another batch normalization layer for the second layer
+        self.bn2 = nn.BatchNorm1d(128)
+
+        # Output layer
         self.fc3 = nn.Linear(128, output_dim)
-        if reg_type == "dropout": self.dropout = nn.Dropout(0.2)
+
+        # Dropout layer, initialize it here
+        self.dropout = nn.Dropout(0.2)
 
     def forward(self, x):
-        if len(x.shape) == 1: x = x.unsqueeze(0)  # Add a batch dimension, making it [1, input_dim]
+        if len(x.shape) == 1:
+            x = x.unsqueeze(0)  # Add a batch dimension, making it [1, input_dim]
 
         module_outputs = [torch.relu(layer(x)) for layer in self.fc1]
+
         if self.reg_type == "batch_norm":
             module_outputs = [
                 self.bn1[i](output) if output.size(0) > 1 else output
@@ -74,14 +89,17 @@ class DQN(nn.Module):
             ]
 
         x = torch.cat(module_outputs, dim=-1)  # Concatenate outputs from all the modules
+
         if self.reg_type == "dropout":
             x = self.dropout(x)
 
         x = torch.relu(self.fc2(x))
+
         if self.reg_type == "batch_norm" and x.size(0) > 1:  # Only apply batch norm if batch size > 1
             x = self.bn2(x)
 
         return self.fc3(x)
+
 
 # Function to assign rewards based on the goal
 def get_goal_reward(reward, state, goal):
@@ -104,11 +122,11 @@ def train_dqn(q_network, target_network, optimizer, reg_type):
     indices = np.random.choice(len(replay_buffer), batch_size, replace=False)
     batch = [replay_buffer[i] for i in indices]
     states, actions, rewards, next_states, dones = zip(*batch)
-    states = torch.tensor(np.array(states), dtype=torch.float32).to('cuda')
-    actions = torch.tensor(actions, dtype=torch.int64).unsqueeze(1).to('cuda')
-    rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1).to('cuda')
-    next_states = torch.tensor(np.array(next_states), dtype=torch.float32).to('cuda')
-    dones = torch.tensor(dones, dtype=torch.float32).unsqueeze(1).to('cuda')
+    states = torch.tensor(np.array(states), dtype=torch.float32).to(device)
+    actions = torch.tensor(actions, dtype=torch.int64).unsqueeze(1).to(device)
+    rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1).to(device)
+    next_states = torch.tensor(np.array(next_states), dtype=torch.float32).to(device)
+    dones = torch.tensor(dones, dtype=torch.float32).unsqueeze(1).to(device)
 
     # Compute the Q-values for current states
     current_q_values = q_network(states).gather(1, actions)
@@ -132,7 +150,7 @@ def train_dqn(q_network, target_network, optimizer, reg_type):
     optimizer.step()
 
 # Evaluate agent on the given goal/environment
-def evaluate_agent(env, num_episodes=5, goal="original"):
+def evaluate_agent(env, q_network, num_episodes=5, goal="original"):
     total_rewards = []
     action_distribution = [0] * env.action_space.n  # To keep track of actions taken
 
@@ -178,6 +196,16 @@ results = {
     "l1": {"rewards": [], "convergence_speed": [], "retention_score": [], "noise_resilience": []},
     "l2": {"rewards": [], "convergence_speed": [], "retention_score": [], "noise_resilience": []},
     "batch_norm": {"rewards": [], "convergence_speed": [], "retention_score": [], "noise_resilience": []}
+}
+
+# Initialize variables for retention results and previous goals
+previous_goals = []  # Stores previously learned goals to evaluate knowledge retention
+retention_results = {
+    reg_type: {
+        "retention_scores": [],
+        "previous_goal_rewards": {},
+        "long_term_adaptability": {}  # Add this to store the long-term adaptability scores for each regularization type
+    } for reg_type in regularization_types
 }
 
 # -------------------- Training DQN --------------------
@@ -236,101 +264,211 @@ convergence_log = {goal: [] for goal in goals + ["original"]}
 # Number of episodes taken to converge after switching to a task
 current_task_episode_count = {goal: 0 for goal in goals + ["original"]}
 
-# Training episodes with task switching
-for reg_type in regularization_types:
-    print(f"\nTraining with Regularization Type: {reg_type}")
-    print(f"CUDA Available: {torch.cuda.is_available()}")
+# Function to evaluate knowledge retention
+def evaluate_knowledge_retention(agent, env, learned_tasks, num_episodes=5):
+    retention_rewards = {}
+    for task in learned_tasks:
+        total_rewards = []
+        print(f"Evaluating knowledge retention for task: {task}")
+        for episode in range(num_episodes):
+            state, _ = env.reset()
+            done = False
+            total_reward = 0
+            while not done:
+                action = select_action(state, epsilon=0, q_network=agent)  # Greedy policy
+                next_state, reward, done, _, _ = env.step(action)
+                total_reward += reward
+                state = next_state
+            total_rewards.append(total_reward)
+        avg_reward = np.mean(total_rewards)
+        retention_rewards[task] = avg_reward
+        print(f"Knowledge Retention - Task: {task}, Avg Reward: {avg_reward}")
+    return retention_rewards
+
+# Function to evaluate long-term adaptability
+def evaluate_long_term_adaptability(agent, env, tasks, num_episodes=10):
+    adaptability_rewards = {}
+    for task in tasks:
+        total_rewards = []
+        print(f"Evaluating long-term adaptability for task: {task}")
+        for episode in range(num_episodes):
+            state, _ = env.reset()
+            state = torch.tensor(state, dtype=torch.float32).to(device)  # Move state to the correct device
+            done = False
+            total_reward = 0
+            while not done:
+                with torch.no_grad():
+                    action = select_action(state.cpu().numpy(), epsilon=0, q_network=agent)  # Greedy policy
+                next_state, reward, done, _, _ = env.step(action)
+
+                # Move next state to the appropriate device
+                next_state = torch.tensor(next_state, dtype=torch.float32).to(device)
+
+                total_reward += reward
+                state = next_state
+            total_rewards.append(total_reward)
+        avg_reward = np.mean(total_rewards)
+        adaptability_rewards[task] = avg_reward
+        print(f"Long-Term Adaptability - Task: {task}, Avg Reward: {avg_reward}")
+    return adaptability_rewards
+
+# Define the available regularization techniques
+regularization_types = ["dropout", "l1", "l2", "batch_norm"]
+
+# If mode is "none", define the fixed regularization type here (e.g., "l1" or "dropout")
+fixed_reg_type = "dropout"  # Choose from ["dropout", "l1", "l2", "batch_norm"]
+
+# Validation check for mode and regularization types
+if mode == "none" and fixed_reg_type not in ["dropout", "l1", "l2", "batch_norm"]:
+    raise ValueError("Invalid fixed_reg_type provided for mode 'none'. Please choose from ['dropout', 'l1', 'l2', 'batch_norm']")
+
+# Define the function to validate single regularization type
+def validate_single_reg_type(q_network, target_network, expected_reg_type):
+    if q_network.reg_type != expected_reg_type or target_network.reg_type != expected_reg_type:
+        raise ValueError(f"Multiple regularization types detected. Only '{expected_reg_type}' is allowed for mode 'none'.")
+
+
+# -------------------- Training DQN --------------------
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"\nTraining with Mode: {mode}")
+print(f"CUDA Available: {torch.cuda.is_available()}")
+if torch.cuda.is_available():
     print(f"Device Name: {torch.cuda.get_device_name(0)}")
 
-    # Initialize model, target, optimizer, and replay buffer
-    q_network = DQN(env.observation_space.shape[0], env.action_space.n, reg_type=reg_type).to('cuda')
-    target_network = DQN(env.observation_space.shape[0], env.action_space.n, reg_type=reg_type).to('cuda')
-    optimizer = optim.Adam(q_network.parameters(), lr=learning_rate, weight_decay=1e-4 if reg_type == "l2" else 0)
-    replay_buffer = deque(maxlen=replay_buffer_size)
+# Initialize model, target, optimizer, and replay buffer
+# In "none" mode, use the fixed regularization type for the entire experiment
+if mode == "none":
+    reg_type = fixed_reg_type
+else:
+    reg_type = None  # Placeholder to be set dynamically based on task-switching
 
-    epsilon = 1.0
-    episode_rewards = []  # Track rewards per episode
-    task_to_reg = {} # Dictonary to store the task for regularized task switching
+# Initialize Q-network and target network with the selected regularization type
+q_network = DQN(env.observation_space.shape[0], env.action_space.n, reg_type=reg_type).to(device)
+target_network = DQN(env.observation_space.shape[0], env.action_space.n, reg_type=reg_type).to(device)
 
-    for episode in range(num_episodes):
-        state, _ = env.reset()
-        total_reward = 0
-        done = False
+# In "none" mode, validate that both networks use the same regularization type
+if mode == "none":
+    validate_single_reg_type(q_network, target_network, reg_type)
 
-        # Determine current task
-        if not use_custom_goals or episode < 100 or episode >= num_episodes - 100:
-            current_goal = "original"
-        else:
-            current_goal = random.choice(goals)
+optimizer = optim.Adam(q_network.parameters(), lr=learning_rate, weight_decay=1e-4 if reg_type == "l2" else 0)
+replay_buffer = deque(maxlen=replay_buffer_size)
 
-        if mode == "none":
-            reg_type = reg_type
-        elif mode == "structured_task_switching":
-            if current_goal not in task_to_reg:
-                task_to_reg[current_goal] = random.choice(regularization_types)
-                print(f"Regularization Type for Task '{current_goal}' is '{task_to_reg[current_goal]}'")
-            reg_type = task_to_reg[current_goal]
-        elif mode == "randomized_task_switching":
-            reg_type = random.choice(regularization_types)
-        else:
-            raise ValueError(f"Unrecognized mode: {mode}")
+# Validate the single regularization type (for mode "none")
+if mode == "none":
+    validate_single_reg_type(q_network, target_network, reg_type)
 
-        # Add parameter noise only if we are evaluating RQ2
+epsilon = 1.0
+episode_rewards = []  # Track rewards per episode
+task_to_reg = {}  # Dictionary to store the task for regularized task switching
+previous_goal = None
+epoch_details = []
+
+for episode in range(num_episodes):
+    state, _ = env.reset()
+    total_reward = 0
+    done = False
+
+    # Determine current task
+    if not use_custom_goals or episode < 100 or episode >= num_episodes - 100:
+        current_goal = "original"
+    else:
+        current_goal = random.choice(goals)
+
+    # Assign regularization type based on the mode
+    if mode == "none":
+        reg_type = fixed_reg_type  # Use the pre-defined fixed regularization type throughout
+    elif mode == "structured_task_switching":
+        if current_goal not in task_to_reg:
+            task_to_reg[current_goal] = random.choice(regularization_types)
+            print(f"Regularization Type for Task '{current_goal}' is '{task_to_reg[current_goal]}'")
+        reg_type = task_to_reg[current_goal]
+    elif mode == "randomized_task_switching":
+        reg_type = random.choice(regularization_types)
+    else:
+        raise ValueError(f"Unrecognized mode: {mode}")
+
+    # Update the regularization type in the model if needed
+    q_network.reg_type = reg_type
+    target_network.reg_type = reg_type
+
+    # Reset convergence counter if switching to a new task
+    if episode > 0 and current_goal != previous_goal:
+        current_task_episode_count[current_goal] = 0
+    previous_goal = current_goal
+
+    # Run the episode
+    while not done:
+        # Add noise to state during training if evaluating RQ2
         if is_rq2:
-            add_parameter_noise(q_network, parameter_noise_stddev)
+            state = add_noise_to_state(state, noise_level=parameter_noise_stddev)
 
-        # Reset convergence counter if switching to a new task
-        if episode > 0 and current_goal != previous_goal:
-            current_task_episode_count[current_goal] = 0
-        previous_goal = current_goal
+        action = q_network(torch.tensor(state, dtype=torch.float32).to('cuda')).argmax().item() if random.random() > epsilon else env.action_space.sample()
+        next_state, reward, done, _, _ = env.step(action)
+        reward = get_goal_reward(shape_reward(state, next_state, reward), state, current_goal)
 
-        # Run the episode
-        while not done:
-            # Add noise to state during training if evaluating RQ2
-            if is_rq2:
-                state = add_noise_to_state(state, noise_level=parameter_noise_stddev)
+        # Add noise to next state if evaluating RQ2
+        if is_rq2:
+            next_state = add_noise_to_state(next_state, noise_level=parameter_noise_stddev)
 
-            action = q_network(torch.tensor(state, dtype=torch.float32).to('cuda')).argmax().item() if random.random() > epsilon else env.action_space.sample()
-            next_state, reward, done, _, _ = env.step(action)
-            reward = get_goal_reward(shape_reward(state, next_state, reward), state, current_goal)
+        replay_buffer.append((state, action, reward, next_state, done))
+        total_steps += 1
+        state = next_state
+        total_reward += reward
+        train_dqn(q_network, target_network, optimizer, reg_type)
 
-            # Add noise to next state if evaluating RQ2
-            if is_rq2:
-                next_state = add_noise_to_state(next_state, noise_level=parameter_noise_stddev)
+        # Update the target network periodically
+        if total_steps % target_update_frequency == 0:
+            target_network.load_state_dict(q_network.state_dict())
 
-            replay_buffer.append((state, action, reward, next_state, done))
-            state = next_state
-            total_reward += reward
-            train_dqn(q_network, target_network, optimizer, reg_type)
+    # Decay epsilon
+    epsilon = max(min_epsilon, epsilon * epsilon_decay)
+    episode_rewards.append(total_reward)
+    results[reg_type]["task_rewards"][current_goal].append(total_reward)
 
-            # Update the target network periodically
-            if total_steps % target_update_frequency == 0:
-                target_network.load_state_dict(q_network.state_dict())
+    # Track the number of episodes taken to converge
+    current_task_episode_count[current_goal] += 1
 
-        # Decay epsilon
-        epsilon = max(min_epsilon, epsilon * epsilon_decay)
-        episode_rewards.append(total_reward)
-        results[reg_type]["task_rewards"][current_goal].append(total_reward)
+    # Store per-episode details
+    epoch_details.append({
+        "Episode": episode + 1,
+        "Task": current_goal,
+        "Regularization Type": reg_type,
+        "Total Reward": total_reward,
+        "Epsilon": epsilon,
+        "Convergence Episodes": current_task_episode_count[current_goal]
+    })
 
-        # Track the number of episodes taken to converge
-        current_task_episode_count[current_goal] += 1
+    # Check if the current task has converged using task-specific reward history
+    if is_converged(results[reg_type]["task_rewards"][current_goal][-window_size:], convergence_threshold):
+        convergence_log[current_goal].append(current_task_episode_count[current_goal])
+        current_task_episode_count[current_goal] = 0  # Reset episode counter for next convergence tracking
 
-        # Check if the current task has converged using task-specific reward history
-        if is_converged(results[reg_type]["task_rewards"][current_goal][-window_size:], convergence_threshold):
-            convergence_log[current_goal].append(current_task_episode_count[current_goal])
-            current_task_episode_count[current_goal] = 0  # Reset episode counter for next convergence tracking
+    # Print progress every episode
+    print(f"Episode: {episode + 1}/{num_episodes}, Goal: {current_goal}, Total Reward: {total_reward}, Epsilon: {epsilon:.3f}, Regularization: {reg_type}")
 
-        # Print progress every episode
-        print(f"Episode: {episode + 1}/{num_episodes}, Goal: {current_goal}, Total Reward: {total_reward}, Epsilon: {epsilon:.3f}")
+epoch_details_df = pd.DataFrame(epoch_details)
 
-    # After training, analyze convergence speed for each task
-    for goal in convergence_log:
-        if len(convergence_log[goal]) > 0:
-            avg_convergence_speed = np.mean(convergence_log[goal])
-        else:
-            avg_convergence_speed = float('inf')  # Use a large number to indicate non-convergence
-        print(
-            f"Goal: {goal}, Average Convergence Speed: {avg_convergence_speed if avg_convergence_speed != float('inf') else 'Did not converge'} episodes")
+# When switching to a new task, evaluate on previously learned tasks
+if current_goal != "original" and current_goal not in previous_goals:
+    previous_goals.append(current_goal)
+    retention_scores = evaluate_knowledge_retention(q_network, env, previous_goals)
+    for goal, score in retention_scores.items():
+        retention_results[reg_type]["previous_goal_rewards"].setdefault(goal, []).append(score)
+
+# After training, analyze convergence speed for each task
+for goal in convergence_log:
+    if len(convergence_log[goal]) > 0:
+        avg_convergence_speed = np.mean(convergence_log[goal])
+    else:
+        avg_convergence_speed = float('inf')  # Use a large number to indicate non-convergence
+    print(
+        f"Goal: {goal}, Average Convergence Speed: {avg_convergence_speed if avg_convergence_speed != float('inf') else 'Did not converge'} episodes")
+
+# Long-Term Adaptability Analysis After Training
+# Evaluate how well the agent performs after extended task switching
+all_goals = goals + ["original"]
+long_term_adaptability_scores = evaluate_long_term_adaptability(q_network, env, all_goals)
+retention_results[reg_type]["long_term_adaptability"] = long_term_adaptability_scores
 
 # Training time tracking
 training_end_time = time.time()
@@ -399,7 +537,6 @@ env.close()
 
 # Define device (use GPU if available, otherwise fallback to CPU)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"Using device: {device}")
 
 # Load the trained model for testing
 q_network.load_state_dict(torch.load("dqn_acrobot_model.pth"))
@@ -497,12 +634,84 @@ print("Average Rewards:", testing_results["average_reward"])
 print("Standard Deviations of Rewards:", testing_results["std_reward"])
 print("Average Episode Durations:", testing_results["average_duration"])
 
+# -------------------- Metrics for Evaluation --------------------
+
+confidence_interval_data = []
+for reg_type in regularization_types:
+    for goal in goals + ["original"]:
+        if goal in retention_results[reg_type]["previous_goal_rewards"]:
+            scores = retention_results[reg_type]["previous_goal_rewards"][goal]
+            if len(scores) > 1:
+                # Calculate mean, standard error, and 95% confidence interval
+                mean = np.mean(scores)
+                std_err = stats.sem(scores)
+                confidence_interval = stats.t(df=len(scores) - 1).interval(0.95, loc=mean, scale=std_err)
+                confidence_interval_data.append(
+                    {
+                        "Regularization Type": reg_type,
+                        "Task": goal,
+                        "Mean Reward": mean,
+                        "Confidence Interval Lower": confidence_interval[0],
+                        "Confidence Interval Upper": confidence_interval[1],
+                    }
+                )
+                # Plot the mean and confidence intervals
+                plt.errorbar(
+                    goal,
+                    mean,
+                    yerr=[
+                        mean - confidence_interval[0],
+                        confidence_interval[1] - mean,
+                    ],
+                    fmt="o",
+                    label=f"{reg_type} ({goal})",
+                )
+
+plt.xlabel("Task")
+plt.ylabel("Average Reward with 95% CI")
+plt.title("Knowledge Retention across Different Regularization Techniques")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# Convert to DataFrame and save to Excel
+confidence_interval_df = pd.DataFrame(confidence_interval_data)
+confidence_interval_df.to_excel("knowledge_retention_confidence_intervals.xlsx", index=False)
+
+# Plot Long-Term Adaptability Analysis
+adaptability_data = []
+for reg_type in regularization_types:
+    for task, avg_reward in retention_results[reg_type]["long_term_adaptability"].items():
+        adaptability_data.append({
+            "Regularization Type": reg_type,
+            "Task": task,
+            "Average Reward": avg_reward
+        })
+        plt.bar(task, avg_reward, label=f"{reg_type} ({task})")
+
+plt.xlabel("Task")
+plt.ylabel("Average Cumulative Reward")
+plt.title("Long-Term Adaptability across Different Regularization Techniques")
+plt.xticks(rotation=45)
+plt.legend()
+plt.grid(axis='y')
+plt.show()
+
+# Convert adaptability data to DataFrame and save to Excel
+adaptability_df = pd.DataFrame(adaptability_data)
+adaptability_df.to_excel("long_term_adaptability_results.xlsx", index=False)
+
+print("All metrics have been successfully saved to Excel files.")
+
 # Save metrics into an Excel file
 output_file = "training_testing_metrics_summary.xlsx"
 with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
 
+    # Save epoch details to a separate sheet
+    epoch_details_df.to_excel(writer, sheet_name="Epoch Details", index=False)
+
     # Metrics Collection Variables
-    window_size = 20  # Rolling window size for averaging metrics
+    window_size = 50  # Rolling window size for averaging metrics
 
     # 1. Average Reward Over Time Across Tasks
     average_rewards_data = []
