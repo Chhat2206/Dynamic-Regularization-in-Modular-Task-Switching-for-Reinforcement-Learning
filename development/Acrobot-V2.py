@@ -265,7 +265,7 @@ def evaluate_knowledge_retention(agent, env, learned_tasks, num_episodes=5):
     return retention_rewards
 
 # Function to evaluate long-term adaptability
-def evaluate_long_term_adaptability(agent, env, tasks, num_episodes=10):
+def evaluate_long_term_adaptability(agent, env, tasks, num_episodes=5, max_eval_steps=300, early_stop_threshold=-200):
     adaptability_rewards = {}
     for task in tasks:
         total_rewards = []
@@ -275,7 +275,8 @@ def evaluate_long_term_adaptability(agent, env, tasks, num_episodes=10):
             state = torch.tensor(state, dtype=torch.float32).to(device)
             done = False
             total_reward = 0
-            while not done:
+            step_count = 0
+            while not done and step_count < max_eval_steps:
                 with torch.no_grad():
                     action = select_action(state.cpu().numpy(), epsilon=0, q_network=agent)  # Greedy policy
                 next_state, reward, done, _, _ = env.step(action)
@@ -283,11 +284,21 @@ def evaluate_long_term_adaptability(agent, env, tasks, num_episodes=10):
 
                 total_reward += reward
                 state = next_state
+                step_count += 1
+
+                # Early stop if the episode reaches a significant negative reward
+                if total_reward < early_stop_threshold and step_count > max_eval_steps // 3:
+                    print(f"Early stop in episode {episode + 1} for task {task} due to low progress.")
+                    break
+
             total_rewards.append(total_reward)
+
         avg_reward = np.mean(total_rewards)
         adaptability_rewards[task] = avg_reward
         print(f"Long-Term Adaptability - Task: {task}, Avg Reward: {avg_reward}")
+
     return adaptability_rewards
+
 
 # Define the available regularization techniques
 regularization_types = ["dropout", "l1", "l2", "batch_norm"]
@@ -329,10 +340,6 @@ if mode == "none":
 
 optimizer = optim.Adam(q_network.parameters(), lr=learning_rate, weight_decay=1e-4 if reg_type == "l2" else 0)
 replay_buffer = deque(maxlen=replay_buffer_size)
-
-# Validate the single regularization type (for mode "none")
-if mode == "none":
-    validate_single_reg_type(q_network, target_network, reg_type)
 
 epsilon = 1.0
 episode_rewards = []  # Track rewards per episode
@@ -418,7 +425,6 @@ for episode in range(num_episodes):
     # Check if the current task has converged using task-specific reward history
     if is_converged(results[reg_type]["task_rewards"][current_goal][-window_size:], convergence_threshold):
         convergence_log[current_goal].append(current_task_episode_count[current_goal])
-        current_task_episode_count[current_goal] = 0  # Reset episode counter for next convergence tracking
 
     # Print progress every episode
     print(f"Episode: {episode + 1}/{num_episodes}, Goal: {current_goal}, Total Reward: {total_reward}, Epsilon: {epsilon:.3f}, Regularization: {reg_type}")
@@ -605,93 +611,24 @@ print("Average Episode Durations:", testing_results["average_duration"])
 
 # -------------------- Metrics for Evaluation --------------------
 
-confidence_interval_data = []
-for reg_type in regularization_types:
-    for goal in goals + ["original"]:
-        if goal in retention_results[reg_type]["previous_goal_rewards"]:
-            scores = retention_results[reg_type]["previous_goal_rewards"][goal]
-            if len(scores) > 1:
-                # Calculate mean, standard error, and 95% confidence interval
-                mean = np.mean(scores)
-                std_err = stats.sem(scores)
-                confidence_interval = stats.t(df=len(scores) - 1).interval(0.95, loc=mean, scale=std_err)
-                confidence_interval_data.append(
-                    {
-                        "Regularization Type": reg_type,
-                        "Task": goal,
-                        "Mean Reward": mean,
-                        "Confidence Interval Lower": confidence_interval[0],
-                        "Confidence Interval Upper": confidence_interval[1],
-                    }
-                )
-                # Plot the mean and confidence intervals
-                plt.errorbar(
-                    goal,
-                    mean,
-                    yerr=[
-                        mean - confidence_interval[0],
-                        confidence_interval[1] - mean,
-                    ],
-                    fmt="o",
-                    label=f"{reg_type} ({goal})",
-                )
-
-plt.xlabel("Task")
-plt.ylabel("Average Reward with 95% CI")
-plt.title("Knowledge Retention across Different Regularization Techniques")
-plt.legend()
-plt.grid(True)
-plt.show()
-
-# Convert to DataFrame and save to Excel
-confidence_interval_df = pd.DataFrame(confidence_interval_data)
-confidence_interval_df.to_excel(f"knowledge_retention_confidence_intervals_{'rq1' if is_rq1 else 'rq2'}_{mode}.xlsx", index=False)
-
-# Plot Long-Term Adaptability Analysis
-adaptability_data = []
-for reg_type in regularization_types:
-    for task, avg_reward in retention_results[reg_type]["long_term_adaptability"].items():
-        adaptability_data.append({
-            "Regularization Type": reg_type,
-            "Task": task,
-            "Average Reward": avg_reward
-        })
-        plt.bar(task, avg_reward, label=f"{reg_type} ({task})")
-
-plt.xlabel("Task")
-plt.ylabel("Average Cumulative Reward")
-plt.title("Long-Term Adaptability across Different Regularization Techniques")
-plt.xticks(rotation=45)
-plt.legend()
-plt.grid(axis='y')
-plt.show()
-
-# Convert adaptability data to DataFrame and save to Excel
-adaptability_df = pd.DataFrame(adaptability_data)
-adaptability_df.to_excel(f"long_term_adaptability_results_{'rq1' if is_rq1 else 'rq2'}_{mode}.xlsx", index=False)
-
-print("All metrics have been successfully saved to Excel files.")
-
-# Save metrics into an Excel file
+# Set up Excel output file
 output_file = f"training_testing_metrics_summary_{'rq1' if is_rq1 else 'rq2'}_{mode}.xlsx"
 with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+    # ----------------------- Epoch Details ----------------------- #
     # Save epoch details directly to a separate sheet
     epoch_details_df = pd.DataFrame(epoch_details)
     epoch_details_df.to_excel(writer, sheet_name="Epoch Details", index=False)
 
-    # Converting all collected data to DataFrames and writing them directly to the Excel workbook
+    # ------------------ Average Rewards Across Tasks ------------------ #
     for reg_type in regularization_types:
-        # Average Reward Over Time Across Tasks
         average_rewards_data = []
         plt.figure(figsize=(10, 6))
         for goal in goals + ["original"]:
             rewards = results[reg_type]["task_rewards"][goal]
             rolling_avg = [np.mean(rewards[max(0, i - window_size):i + 1]) for i in range(len(rewards))]
 
-            # Console Output for Average Rewards
-            print(f"\n[Console Output - {reg_type} - {goal}]: Average Rewards (Rolling Window)")
+            # Save data to list for dataframe
             for i, avg_reward in enumerate(rolling_avg):
-                print(f"Episode {i + 1}: Average Reward = {avg_reward:.2f}")
                 average_rewards_data.append({
                     "Mode": mode,
                     "Regularization Type": reg_type,
@@ -703,6 +640,7 @@ with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
             # Plotting the average rewards per task
             plt.plot(rolling_avg, label=f"{goal} ({reg_type})")
 
+        # Plot settings
         plt.xlabel("Episodes")
         plt.ylabel("Average Reward (Rolling Window)")
         plt.title(f"Average Reward Trends per Task (Mode: {mode})")
@@ -714,36 +652,35 @@ with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
         average_rewards_df = pd.DataFrame(average_rewards_data)
         average_rewards_df.to_excel(writer, sheet_name=f"{reg_type}_Average Rewards", index=False)
 
-        # Convergence Speed per Task
+    # ------------------ Convergence Speed per Task ------------------ #
+    for reg_type in regularization_types:
         convergence_speed_data = []
         plt.figure(figsize=(10, 6))
         for goal in goals + ["original"]:
             task_rewards = results[reg_type]["task_rewards"][goal]
-            convergence_times = []
-            for i in range(len(task_rewards)):
-                if np.mean(task_rewards[max(0, i - window_size):i + 1]) >= convergence_threshold:
-                    convergence_times.append(i + 1)
-                    break
+            convergence_times = [i + 1 for i in range(len(task_rewards)) if np.mean(task_rewards[max(0, i - window_size):i + 1]) >= convergence_threshold]
 
+            # Calculate average and standard deviation for convergence
             if convergence_times:
                 avg_convergence = np.mean(convergence_times)
                 std_convergence = np.std(convergence_times)
+            else:
+                avg_convergence = float('inf')
+                std_convergence = 0
 
-                # Console Output for Convergence Speed
-                print(f"\n[Console Output - {reg_type} - {goal}]: Convergence Speed")
-                print(f"Average Episodes to Converge: {avg_convergence:.2f}, Std Dev: {std_convergence:.2f}")
+            # Save data for dataframe
+            convergence_speed_data.append({
+                "Mode": mode,
+                "Regularization Type": reg_type,
+                "Task": goal,
+                "Average Episodes to Converge": avg_convergence,
+                "Std Dev": std_convergence
+            })
 
-                convergence_speed_data.append({
-                    "Mode": mode,
-                    "Regularization Type": reg_type,
-                    "Task": goal,
-                    "Average Episodes to Converge": avg_convergence,
-                    "Std Dev": std_convergence
-                })
+            # Plot convergence speed
+            plt.bar(goal, avg_convergence, yerr=std_convergence, capsize=5, label=f"{goal} ({reg_type})")
 
-                # Plotting convergence times
-                plt.bar(goal, avg_convergence, yerr=std_convergence, capsize=5, label=f"{goal} ({reg_type})")
-
+        # Plot settings
         plt.xlabel("Tasks")
         plt.ylabel("Average Episodes to Converge")
         plt.title(f"Convergence Speed per Task (Mode: {mode})")
@@ -755,17 +692,16 @@ with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
         convergence_speed_df = pd.DataFrame(convergence_speed_data)
         convergence_speed_df.to_excel(writer, sheet_name=f"{reg_type}_Convergence Speed", index=False)
 
-        # Reward Variance During Training
+    # ------------------ Reward Variance During Training ------------------ #
+    for reg_type in regularization_types:
         reward_variances_data = []
         plt.figure(figsize=(10, 6))
         for goal in goals + ["original"]:
             task_rewards = results[reg_type]["task_rewards"][goal]
             rolling_std = [np.std(task_rewards[max(0, i - window_size):i + 1]) for i in range(len(task_rewards))]
 
-            # Console Output for Reward Variance
-            print(f"\n[Console Output - {reg_type} - {goal}]: Reward Variance (Rolling Window)")
+            # Save data for dataframe
             for i, std_reward in enumerate(rolling_std):
-                print(f"Episode {i + 1}: Reward Std Dev = {std_reward:.2f}")
                 reward_variances_data.append({
                     "Mode": mode,
                     "Regularization Type": reg_type,
@@ -774,9 +710,10 @@ with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
                     "Reward Std Dev (Rolling Window)": std_reward
                 })
 
-            # Plotting the reward variance per task
+            # Plot reward variance per task
             plt.plot(rolling_std, label=f"{goal} ({reg_type})")
 
+        # Plot settings
         plt.xlabel("Episodes")
         plt.ylabel("Reward Standard Deviation (Rolling Window)")
         plt.title(f"Reward Variance Trends per Task (Mode: {mode})")
@@ -788,7 +725,7 @@ with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
         reward_variances_df = pd.DataFrame(reward_variances_data)
         reward_variances_df.to_excel(writer, sheet_name=f"{reg_type}_Reward Variance", index=False)
 
-    # Write Testing Results to a sheet
+    # ------------------ Testing Results Summary ------------------ #
     testing_results_df = pd.DataFrame({
         "Mode": [mode] * len(testing_results["noise_level"]),
         "Noise Level": testing_results["noise_level"],
@@ -796,54 +733,73 @@ with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
         "Reward Std Dev": testing_results["std_reward"],
         "Average Duration (seconds)": testing_results["average_duration"]
     })
-
-    # Console Output for Testing Results
-    print("\n[Console Output]: Testing Results Summary")
-    for i, noise_level in enumerate(testing_results["noise_level"]):
-        print(f"Noise Level: {noise_level}")
-        print(f"  Average Reward: {testing_results['average_reward'][i]:.2f}")
-        print(f"  Reward Std Dev: {testing_results['std_reward'][i]:.2f}")
-        print(f"  Average Duration: {testing_results['average_duration'][i]:.2f} seconds")
-
-    # Plotting Testing Results
-    plt.figure(figsize=(15, 5))
-
-    # Plot average rewards for each noise level
-    plt.subplot(1, 3, 1)
-    plt.plot(testing_results["noise_level"], testing_results["average_reward"], marker='o', linestyle='-', color='b',
-             label='Avg Reward')
-    plt.xlabel("Noise Level")
-    plt.ylabel("Average Reward")
-    plt.title(f"Average Reward vs. Noise Level (Mode: {mode})")
-    plt.legend()
-    plt.grid(True)
-
-    # Plot standard deviation of rewards for each noise level
-    plt.subplot(1, 3, 2)
-    plt.plot(testing_results["noise_level"], testing_results["std_reward"], marker='o', linestyle='-', color='r',
-             label='Std Dev of Reward')
-    plt.xlabel("Noise Level")
-    plt.ylabel("Reward Standard Deviation")
-    plt.title(f"Reward Std Dev vs. Noise Level (Mode: {mode})")
-    plt.legend()
-    plt.grid(True)
-
-    # Plot average episode duration for each noise level
-    plt.subplot(1, 3, 3)
-    plt.plot(testing_results["noise_level"], testing_results["average_duration"], marker='o', linestyle='-', color='g',
-             label='Avg Duration')
-    plt.xlabel("Noise Level")
-    plt.ylabel("Average Duration (seconds)")
-    plt.title(f"Average Duration vs. Noise Level (Mode: {mode})")
-    plt.legend()
-    plt.grid(True)
-
-    plt.tight_layout()
-    plt.show()
-
     testing_results_df.to_excel(writer, sheet_name="Testing Results Summary", index=False)
 
-    # Long-Term Adaptability Results
+
+    # Function to evaluate knowledge retention (fixed)
+    def evaluate_knowledge_retention(agent, env, learned_tasks, num_episodes=5):
+        retention_rewards = {}
+        for task in learned_tasks:
+            total_rewards = []
+            print(f"Evaluating knowledge retention for task: {task}")
+            for episode in range(num_episodes):
+                state, _ = env.reset()
+                done = False
+                total_reward = 0
+                while not done:
+                    action = select_action(state, epsilon=0, q_network=agent)  # Greedy policy
+                    next_state, reward, done, _, _ = env.step(action)
+                    total_reward += reward
+                    state = next_state
+                total_rewards.append(total_reward)
+            avg_reward = np.mean(total_rewards)
+            retention_rewards[task] = avg_reward
+            print(f"Knowledge Retention - Task: {task}, Avg Reward: {avg_reward}")
+        return retention_rewards
+
+
+    # Function to evaluate long-term adaptability (fixed)
+    def evaluate_long_term_adaptability(agent, env, tasks, num_episodes=10):
+        adaptability_rewards = {}
+        for task in tasks:
+            total_rewards = []
+            print(f"Evaluating long-term adaptability for task: {task}")
+            for episode in range(num_episodes):
+                state, _ = env.reset()
+                state = torch.tensor(state, dtype=torch.float32).to(device)
+                done = False
+                total_reward = 0
+                while not done:
+                    with torch.no_grad():
+                        action = select_action(state.cpu().numpy(), epsilon=0, q_network=agent)  # Greedy policy
+                    next_state, reward, done, _, _ = env.step(action)
+                    next_state = torch.tensor(next_state, dtype=torch.float32).to(device)
+
+                    total_reward += reward
+                    state = next_state
+                total_rewards.append(total_reward)
+            avg_reward = np.mean(total_rewards)
+            adaptability_rewards[task] = avg_reward
+            print(f"Long-Term Adaptability - Task: {task}, Avg Reward: {avg_reward}")
+        return adaptability_rewards
+
+
+    # After training, evaluate and store adaptability and retention metrics
+    for reg_type in regularization_types:
+        # Evaluate long-term adaptability for each task
+        long_term_adaptability_scores = evaluate_long_term_adaptability(
+            q_network, env, goals + ["original"], num_episodes=10
+        )
+        retention_results[reg_type]["long_term_adaptability"] = long_term_adaptability_scores
+
+        # Ensure we add to `previous_goals` only if the task has been adequately trained
+        if len(previous_goals) > 0:
+            # Evaluate knowledge retention for previously learned tasks
+            retention_scores = evaluate_knowledge_retention(q_network, env, previous_goals)
+            for goal, score in retention_scores.items():
+                retention_results[reg_type]["previous_goal_rewards"].setdefault(goal, []).append(score)
+
+    # ------------------ Long-Term Adaptability Results  ------------------ #
     adaptability_data = []
     plt.figure(figsize=(10, 6))
     for reg_type in regularization_types:
@@ -854,25 +810,22 @@ with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
                 "Average Reward": avg_reward
             })
 
-            # Console Output for Long-Term Adaptability
-            print(f"\n[Console Output - {reg_type} - {task}]: Long-Term Adaptability")
-            print(f"Average Reward: {avg_reward:.2f}")
-
             # Plot long-term adaptability per task
-            plt.bar(task, avg_reward, label=f"{reg_type} ({task})")
+            plt.bar(f"{task} ({reg_type})", avg_reward)
 
+    # Plot settings
     plt.xlabel("Task")
     plt.ylabel("Average Cumulative Reward")
     plt.title("Long-Term Adaptability across Different Regularization Techniques")
     plt.xticks(rotation=45)
-    plt.legend()
     plt.grid(axis='y')
+    plt.tight_layout()
     plt.show()
 
     adaptability_df = pd.DataFrame(adaptability_data)
     adaptability_df.to_excel(writer, sheet_name="Long Term Adaptability", index=False)
 
-    # Knowledge Retention Confidence Intervals
+    # ------------------ Knowledge Retention Confidence Intervals ------------------ #
     confidence_interval_data = []
     plt.figure(figsize=(10, 6))
     for reg_type in regularization_types:
@@ -882,13 +835,9 @@ with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
                 if len(scores) > 1:
                     mean = np.mean(scores)
                     std_err = stats.sem(scores)
-                    confidence_interval = stats.t(df=len(scores) - 1).interval(0.95, loc=mean, scale=std_err)
+                    confidence_interval = stats.t.interval(0.95, len(scores) - 1, loc=mean, scale=std_err)
 
-                    # Console Output for Confidence Intervals
-                    print(f"\n[Console Output - {reg_type} - {goal}]: Knowledge Retention Confidence Interval")
-                    print(
-                        f"Mean Reward: {mean:.2f}, 95% CI: ({confidence_interval[0]:.2f}, {confidence_interval[1]:.2f})")
-
+                    # Save confidence interval data for dataframe
                     confidence_interval_data.append({
                         "Regularization Type": reg_type,
                         "Task": goal,
@@ -898,27 +847,23 @@ with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
                     })
 
                     # Plot confidence intervals
-                    plt.errorbar(goal, mean, yerr=[mean - confidence_interval[0], confidence_interval[1] - mean],
-                                 fmt="o", label=f"{reg_type} ({goal})")
+                    plt.errorbar(f"{goal} ({reg_type})", mean,
+                                 yerr=[[mean - confidence_interval[0]], [confidence_interval[1] - mean]],
+                                 fmt="o")
 
+    # Plot settings
     plt.xlabel("Task")
     plt.ylabel("Average Reward with 95% CI")
     plt.title("Knowledge Retention across Different Regularization Techniques")
-    plt.legend()
+    plt.xticks(rotation=45)
     plt.grid(True)
+    plt.tight_layout()
     plt.show()
 
     confidence_interval_df = pd.DataFrame(confidence_interval_data)
     confidence_interval_df.to_excel(writer, sheet_name="Knowledge Retention CI", index=False)
 
-print(f"All metrics have been successfully saved to {output_file}")
-
-# -------------------- Long-Term Adaptability Analysis --------------------
-
-# Evaluate how well the agent performs after extended task switching
-all_goals = goals + ["original"]
-long_term_adaptability_scores = evaluate_long_term_adaptability(q_network, env, all_goals)
-retention_results[reg_type]["long_term_adaptability"] = long_term_adaptability_scores
+    print(f"All metrics have been successfully saved to {output_file}")
 
 # Close the environment after testing
 env.close()
