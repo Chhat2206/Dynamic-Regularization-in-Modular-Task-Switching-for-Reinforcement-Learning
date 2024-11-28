@@ -102,7 +102,7 @@ def add_noise_to_state(state, noise_level=0.1):
 # Function to train the DQN using replay buffer
 def train_dqn(q_network, target_network, optimizer, reg_type):
     if len(replay_buffer) < batch_size:
-        print(f"Insufficient samples in replay buffer ({len(replay_buffer)}). Waiting to collect more samples.")
+    #     print(f"Insufficient samples in replay buffer ({len(replay_buffer)}). Waiting to collect more samples.")
         return
 
     # Sample random mini-batch
@@ -593,10 +593,6 @@ for episode in range(num_episodes):
     rewards_log["episode"].append(episode + 1)
     rewards_log["reward"].append(total_reward)
 
-    # Save after training
-    rewards_df = pd.DataFrame(rewards_log)
-    rewards_df.to_csv("rewards_log.csv", index=False)
-
     results[reg_type]["task_rewards"][current_goal].append(total_reward)
 
     # Perform validation every eval_interval episodes
@@ -724,23 +720,69 @@ env.close()
 
 # --- Validation Phase ---
 # Validation Phase: Evaluate agent on unseen tasks or conditions
-def validate_agent(agent, env, validation_goals, num_episodes=5, timeout=60):
+import time
+
+
+def validate_agent(agent, env, validation_goals, num_episodes=5, timeout=45):
     validation_results = {}
 
     for goal in validation_goals:
         start_time = time.time()  # Record the start time for the goal
-        avg_reward, action_distribution = evaluate_agent(env, agent, num_episodes, goal)
+        total_reward = 0
+        total_steps = 0
+        print(f"Start validating for goal: {goal}")
 
-        # Check if the time taken for validation has exceeded the timeout
-        if time.time() - start_time > timeout:
-            print(f"Validation for goal '{goal}' took too long, skipping...")
-            validation_results[goal] = None
-            continue
+        for episode in range(num_episodes):
+            # If the elapsed time exceeds the timeout, skip this goal
+            elapsed_time = time.time() - start_time
+            if elapsed_time > timeout:
+                print(
+                    f"Validation for goal '{goal}' took too long ({elapsed_time:.2f}s), skipping after {episode} episodes.")
+                validation_results[goal] = None  # Mark the goal as skipped
+                break  # Skip to the next goal
 
-        validation_results[goal] = avg_reward
-        print(f"Validation - Goal: {goal}, Avg Reward: {avg_reward}")
+            print(f"Starting Episode {episode + 1} for goal: {goal}")
+
+            state, _ = env.reset()  # Reset the environment and get the starting state
+            done = False
+            episode_reward = 0
+            episode_steps = 0
+
+            while not done:
+                # If time exceeds the limit while running an episode, abort early
+                elapsed_time = time.time() - start_time
+                if elapsed_time > timeout:
+                    print(f"Timeout during episode {episode + 1} for goal '{goal}', skipping...")
+                    validation_results[goal] = None
+                    break
+
+                # Log progress in each step
+                print(f"  Episode {episode + 1}, Step {episode_steps}, Elapsed Time: {elapsed_time:.2f}s")
+                action = select_action(state, epsilon=0, q_network=agent)
+                next_state, reward, done, _, _ = env.step(action)
+
+                episode_reward += reward
+                episode_steps += 1
+                state = next_state
+
+                if elapsed_time > timeout:
+                    print(f"Timeout reached during step {episode_steps} of episode {episode + 1}.")
+                    validation_results[goal] = None
+                    break  # Break early if timeout is reached
+
+            if elapsed_time > timeout:
+                break  # If we broke early due to timeout, break the loop for this goal
+
+            total_reward += episode_reward
+            total_steps += episode_steps
+
+        if goal not in validation_results:  # Only add result if it wasn't skipped
+            avg_reward = total_reward / num_episodes
+            validation_results[goal] = avg_reward
+            print(f"Validation - Goal: {goal}, Avg Reward: {avg_reward}")
 
     return validation_results
+
 
 # Run the validation phase
 print("\n--- Validation Phase ---")
@@ -1022,35 +1064,42 @@ print("All results consolidated and saved to 'results.json'")
 
 # --- Save all results to Excel ---
 with pd.ExcelWriter('results.xlsx', engine='openpyxl') as writer:
-    # Save each section of results to a different sheet
+    # Convert and save 'epoch_details' if it's a list of dictionaries (common after training)
     if 'epoch_details' in consolidated_results:
         epoch_df = pd.DataFrame(consolidated_results['epoch_details'])
         epoch_df.to_excel(writer, sheet_name='Epoch Details', index=False)
 
+    # Convert and save 'validation_results' if it's in a dictionary/list format
     if 'validation_results' in consolidated_results:
         validation_df = pd.DataFrame(consolidated_results['validation_results'])
         validation_df.to_excel(writer, sheet_name='Validation Results', index=False)
 
+    # Convert and save 'convergence_results' if it's a list or dictionary
     if 'convergence_results' in consolidated_results:
         convergence_df = pd.DataFrame(consolidated_results['convergence_results'])
         convergence_df.to_excel(writer, sheet_name='Convergence Results', index=False)
 
+    # Convert and save 'structured_testing_results'
     if 'structured_testing_results' in consolidated_results:
         structured_testing_df = pd.DataFrame(consolidated_results['structured_testing_results'])
         structured_testing_df.to_excel(writer, sheet_name='Structured Testing', index=False)
 
+    # Convert and save 'comparison_results'
     if 'comparison_results' in consolidated_results:
         comparison_df = pd.DataFrame(consolidated_results['comparison_results'])
         comparison_df.to_excel(writer, sheet_name='Comparison Results', index=False)
 
+    # Convert and save 'testing_results'
     if 'testing_results' in consolidated_results:
         testing_df = pd.DataFrame(consolidated_results['testing_results'])
         testing_df.to_excel(writer, sheet_name='Testing Results', index=False)
 
+    # Convert and save 'action_distributions'
     if 'action_distributions' in consolidated_results:
         action_distributions_df = pd.DataFrame(consolidated_results['action_distributions'])
         action_distributions_df.to_excel(writer, sheet_name='Action Distributions', index=False)
 
+# Notify that the results were saved successfully
 print("All results saved to 'results.xlsx'")
 
 # Close the environment after testing
