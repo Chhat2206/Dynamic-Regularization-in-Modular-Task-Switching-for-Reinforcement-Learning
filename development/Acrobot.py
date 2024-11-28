@@ -171,6 +171,9 @@ retention_results = {
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Training with device: {device}")
 
+action_distributions = {}
+possible_actions = [0, 1, 2]
+
 # Evaluate agent on the given goal/environment
 def evaluate_agent(env, q_network, num_episodes=5, goal="original"):
     total_rewards = []
@@ -201,13 +204,13 @@ def evaluate_agent(env, q_network, num_episodes=5, goal="original"):
     print(f"Average Reward after Evaluation for Goal '{goal}': {avg_reward}")
     print(f"Action Distribution during Evaluation: {action_distribution}")
 
+    action_distributions[goal] = action_distribution
     return avg_reward, action_distribution
 
 def add_noise_to_action(action, num_actions, noise_probability=0.1):
     if random.random() < noise_probability:
         return random.choice(range(num_actions))  # Select a random action
     return action
-
 
 # Function to select action using epsilon-greedy policy
 def select_action(state, epsilon, q_network, noise_level=0.1, action_noise_prob=0.1):
@@ -373,7 +376,6 @@ task_to_reg = {}  # Dictionary to store the task for regularized task switching
 previous_goal = None
 epoch_details = []
 
-import datetime
 log_dir = f"runs/{mode}_{'RQ1' if is_rq1 else 'RQ2'}_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
 writers = {reg_type: SummaryWriter(log_dir=f"{log_dir}/{reg_type}") for reg_type in regularization_types}
 general_writer = SummaryWriter(log_dir=f"{log_dir}/general")
@@ -436,25 +438,6 @@ def validate_agent(agent, env, validation_goals, num_episodes=5):
             noise_level = 0.3
             action_noise_prob = 0.0
 
-        elif goal == "revisit_balance_under_noise":
-            def reward_shaping(state, reward):
-                if abs(state[0]) < 0.5:  # Close to balance
-                    reward += 1.0
-                return reward
-
-            noise_level = 0.2
-            action_noise_prob = 0.0
-
-        elif goal == "revisit_swing_with_speed_penalty":
-            def reward_shaping(state, reward):
-                reward -= abs(state[3]) * 0.1  # Penalize high angular velocity
-                if abs(state[1]) > 1.5:  # Reward high swing amplitude
-                    reward += 1.0
-                return reward
-
-            noise_level = 0.0
-            action_noise_prob = 0.1
-
         else:
             print(f"Unknown validation goal: {goal}")
             continue
@@ -493,14 +476,28 @@ validation_goals = [
     "high_state_noise",
     "noisy_stabilization",
     "noisy_swing_maximization",
-    "revisit_balance_under_noise",
-    "revisit_swing_with_speed_penalty"
 ]
 
 # Calculate success rate as the percentage of episodes where total reward >= threshold.
 def calculate_success_rate(rewards, threshold):
     successes = [1 for r in rewards if r >= threshold]
     return (sum(successes) / len(rewards)) * 100 if rewards else 0
+
+# Function to assign a unique regularization to each task
+def assign_regularization_to_task(task_name, assigned_regularizations):
+    available_regs = [reg for reg in regularization_types if reg not in assigned_regularizations]
+
+    if not available_regs:
+        print(f"Warning: No available regularization for task '{task_name}'. All regularizations are already used.")
+        return None  # No available regularization left
+
+    # Randomly choose one from the available regularizations
+    assigned_reg = random.choice(available_regs)
+    assigned_regularizations.add(assigned_reg)
+    return assigned_reg
+
+assigned_regularizations = set()
+task_to_reg = {}
 
 for episode in range(num_episodes):
     q_network.train()
@@ -519,9 +516,12 @@ for episode in range(num_episodes):
         reg_type = fixed_reg_type  # Use the pre-defined fixed regularization type throughout
     elif mode == "structured_task_switching":
         if current_goal not in task_to_reg:
-            task_to_reg[current_goal] = random.choice(regularization_types)
-            print(f"Regularization Type for Task '{current_goal}' is '{task_to_reg[current_goal]}'")
-        reg_type = task_to_reg[current_goal]
+            assigned_reg = assign_regularization_to_task(current_goal, assigned_regularizations)
+            if assigned_reg is not None:
+                task_to_reg[current_goal] = assigned_reg
+                print(f"Assigned Regularization Type for Task '{current_goal}' is '{assigned_reg}'")
+
+        reg_type = task_to_reg.get(current_goal, "None")  # Default to "None" if no regularization assigned
     elif mode == "randomized_task_switching":
         reg_type = random.choice(regularization_types)
     else:
@@ -607,10 +607,6 @@ for episode in range(num_episodes):
         # Log validation results to TensorBoard
         for goal, avg_reward in validation_results.items():
             general_writer.add_scalar(f"Validation/Average_Reward/{goal}", avg_reward, episode)
-
-        # Optionally save periodic validation results for later analysis
-        with open(f"validation_results_episode_{episode}.pkl", "wb") as f:
-            pickle.dump(validation_results, f)
 
     # Log total rewards for the episode
     writers[reg_type].add_scalar(f"{reg_type}/Episode Reward", total_reward, episode)
@@ -720,23 +716,30 @@ for reg_type in regularization_types:
         # Evaluate agent and log action distribution
         avg_reward, action_distribution = evaluate_agent(env, q_network, num_episodes=5, goal=goal)
 
-        for action, count in enumerate(action_distribution):
-            writers[reg_type].add_scalar(f"{reg_type}/Action_Distribution/{goal}/Action_{action}", count, episode)
-
         avg_rewards_per_goal[goal] = avg_reward
         results[reg_type]["retention_score"].append(avg_reward)
     print(f"Avg Reward per Goal for {reg_type}: {avg_rewards_per_goal}")
 
-# env.close
+env.close()
 
 # --- Validation Phase ---
 # Validation Phase: Evaluate agent on unseen tasks or conditions
-def validate_agent(agent, env, validation_goals, num_episodes=5):
+def validate_agent(agent, env, validation_goals, num_episodes=5, timeout=60):
     validation_results = {}
+
     for goal in validation_goals:
+        start_time = time.time()  # Record the start time for the goal
         avg_reward, action_distribution = evaluate_agent(env, agent, num_episodes, goal)
+
+        # Check if the time taken for validation has exceeded the timeout
+        if time.time() - start_time > timeout:
+            print(f"Validation for goal '{goal}' took too long, skipping...")
+            validation_results[goal] = None
+            continue
+
         validation_results[goal] = avg_reward
         print(f"Validation - Goal: {goal}, Avg Reward: {avg_reward}")
+
     return validation_results
 
 # Run the validation phase
@@ -925,52 +928,46 @@ testing_results = {
 }
 
 # Improved Testing loop with detailed print statements for each episode
+# In the Testing Phase, ensure detailed logging for noise resilience testing:
 for noise_level in noise_levels:
     print(f"\nTesting with Noise Level: {noise_level}")
     eval_rewards = []
     episode_durations = []
 
     for episode in range(test_episodes):
-        episode_start_time = time.time()  # Start time for each test episode
-        state, _ = env.reset()  # Initialize the environment and get the starting state
-        state = torch.tensor(state, dtype=torch.float32).to(device)  # Move state to the correct device
-        total_reward = 0  # Initialize the total reward counter
-        done = False  # Boolean to check if the episode is complete
-        step_count = 0  # Step counter to limit maximum steps per episode
+        state, _ = env.reset()  # Reset environment for each test
+        state = torch.tensor(state, dtype=torch.float32).to(device)  # Ensure state is on the right device
+        total_reward = 0
+        done = False
+        step_count = 0
 
         while not done and step_count < max_steps:
-            with torch.no_grad():  # Ensure no training happens during testing
-                # Use the model to select an action without exploration
-                action = select_action(state.cpu().numpy(), epsilon=0, q_network=q_network, noise_level=noise_level)  # Greedy policy
-                next_state, reward, done, _, _ = env.step(action)
+            episode_start_time = time.time()
+            action = select_action(state.cpu().numpy(), epsilon=0, q_network=q_network, noise_level=noise_level)
+            next_state, reward, done, _, _ = env.step(action)
 
-                # Optionally add noise to the next state (for testing noise resilience)
-                next_state = add_noise_to_state(next_state, noise_level)
-                state = torch.tensor(next_state, dtype=torch.float32).to(device)  # Move next state to the correct device
-                total_reward += reward
-                step_count += 1
+            # Optionally add noise to the state (e.g., for noise resilience testing)
+            next_state = add_noise_to_state(next_state, noise_level)
+            state = torch.tensor(next_state, dtype=torch.float32).to(device)  # Ensure the next state is on the correct device
+            total_reward += reward
+            step_count += 1
 
-        # Track total rewards and duration for evaluation
         eval_rewards.append(total_reward)
-        episode_end_time = time.time()
-        episode_duration = episode_end_time - episode_start_time
+        episode_duration = time.time() - episode_start_time
         episode_durations.append(episode_duration)
 
-        # Print progress for each test episode with detailed info
-        print(f"Test {episode + 1}/{test_episodes}: Noise Level {noise_level}, Total Reward: {total_reward:.2f}, "
-              f"Duration: {episode_duration:.2f} seconds, Steps: {step_count}")
+        print(f"Test {episode + 1}/{test_episodes}: Reward: {total_reward:.2f}, Duration: {episode_duration:.2f} s")
 
-    # Calculate average and log noise resilience for this noise level
     avg_reward = np.mean(eval_rewards)
-    writers[reg_type].add_scalar(f"{reg_type}/Noise_Resilience/{noise_level}", avg_reward, noise_level)
-
-    print(f"\nSummary for Noise Level {noise_level}:")
-    print(f"Average Reward: {avg_reward:.2f}")
-    print(f"Average Episode Duration: {np.mean(episode_durations):.2f} seconds")
-    # Calculate statistics
-    avg_reward = np.mean(eval_rewards)
-    std_reward = np.std(eval_rewards)
     avg_duration = np.mean(episode_durations)
+    std_reward = np.std(eval_rewards)
+
+    # Save results for noise resilience testing:
+    writers[reg_type].add_scalar(f"{reg_type}/Noise_Resilience/{noise_level}/Avg_Reward", avg_reward)
+    writers[reg_type].add_scalar(f"{reg_type}/Noise_Resilience/{noise_level}/Std_Reward", std_reward)
+
+    # Print summary for this noise level:
+    print(f"Noise Level: {noise_level} - Avg Reward: {avg_reward:.2f}, Std Reward: {std_reward:.2f}, Avg Duration: {avg_duration:.2f}")
 
     # Append to results
     testing_results["noise_level"].append(noise_level)
@@ -1013,7 +1010,8 @@ consolidated_results = {
     "convergence_results": convergence_log,  # Convergence speed results
     "structured_testing_results": structured_testing_results,  # Structured testing phase results
     "comparison_results": comparison_results,  # Regularization comparison
-    "testing_results": testing_results  # Noise resilience testing results
+    "testing_results": testing_results,  # Noise resilience testing results
+    "action_distributions": action_distributions  # Action distributions
 }
 
 # Save the consolidated results to a single JSON file
@@ -1021,6 +1019,39 @@ with open("results.json", "w") as f:
     json.dump(consolidated_results, f, indent=4)
 
 print("All results consolidated and saved to 'results.json'")
+
+# --- Save all results to Excel ---
+with pd.ExcelWriter('results.xlsx', engine='openpyxl') as writer:
+    # Save each section of results to a different sheet
+    if 'epoch_details' in consolidated_results:
+        epoch_df = pd.DataFrame(consolidated_results['epoch_details'])
+        epoch_df.to_excel(writer, sheet_name='Epoch Details', index=False)
+
+    if 'validation_results' in consolidated_results:
+        validation_df = pd.DataFrame(consolidated_results['validation_results'])
+        validation_df.to_excel(writer, sheet_name='Validation Results', index=False)
+
+    if 'convergence_results' in consolidated_results:
+        convergence_df = pd.DataFrame(consolidated_results['convergence_results'])
+        convergence_df.to_excel(writer, sheet_name='Convergence Results', index=False)
+
+    if 'structured_testing_results' in consolidated_results:
+        structured_testing_df = pd.DataFrame(consolidated_results['structured_testing_results'])
+        structured_testing_df.to_excel(writer, sheet_name='Structured Testing', index=False)
+
+    if 'comparison_results' in consolidated_results:
+        comparison_df = pd.DataFrame(consolidated_results['comparison_results'])
+        comparison_df.to_excel(writer, sheet_name='Comparison Results', index=False)
+
+    if 'testing_results' in consolidated_results:
+        testing_df = pd.DataFrame(consolidated_results['testing_results'])
+        testing_df.to_excel(writer, sheet_name='Testing Results', index=False)
+
+    if 'action_distributions' in consolidated_results:
+        action_distributions_df = pd.DataFrame(consolidated_results['action_distributions'])
+        action_distributions_df.to_excel(writer, sheet_name='Action Distributions', index=False)
+
+print("All results saved to 'results.xlsx'")
 
 # Close the environment after testing
 env.close()
