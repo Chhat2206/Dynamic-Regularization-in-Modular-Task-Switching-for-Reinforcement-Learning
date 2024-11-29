@@ -659,8 +659,8 @@ for episode in range(num_episodes):
     writers[reg_type].add_scalar(f"{reg_type}/Episode Reward", total_reward, episode)
 
     # Log epsilon value (exploration rate)
-    writers[reg_type].add_scalar(f"Task/Epsilon", epsilon, episode)
-    writers[reg_type].add_scalar(f"Task/{current_goal}/Total_Reward", total_reward, episode)
+    writers[reg_type].add_scalar(f"{reg_type}/Epsilon", epsilon, episode)
+    writers[reg_type].add_scalar(f"{reg_type}/{current_goal}/Total_Reward", total_reward, episode)
 
     # Log rolling average and standard deviation
     if len(episode_rewards) >= window_size:
@@ -719,9 +719,9 @@ for goal in convergence_log:
     else:
         avg_convergence_speed = None  # Indicates no convergence occurred
 
-    # Log average convergence speed (skip None values)
-    if avg_convergence_speed is not None:
-        general_writer.add_scalar(f"Convergence_Speed/{goal}", avg_convergence_speed, episode)
+    # # Log average convergence speed (skip None values)
+    # if avg_convergence_speed is not None:
+    #     general_writer.add_scalar(f"Convergence_Speed/{goal}", avg_convergence_speed, episode)
 
     # Print results for clarity
     print(
@@ -771,8 +771,8 @@ for reg_type in regularization_types:
         # Save results to TensorBoard
         eval_step = 0
         general_writer.add_scalar(f"Training/Avg_Reward/{goal}/{reg_type}", avg_reward, eval_step)
-        for i, count in enumerate(action_distribution):
-            general_writer.add_scalar(f"Training/Action_Distribution/{goal}/{reg_type}/Action_{i}", count, eval_step)
+        # for i, count in enumerate(action_distribution):
+        #     general_writer.add_scalar(f"Training/Action_Distribution/{goal}/{reg_type}/Action_{i}", count, eval_step)
 
         eval_step += 1
 
@@ -789,29 +789,43 @@ flattened_task_results = []
 # Log structured testing results to TensorBoard for each task and reg_type
 for goal, reg_dict in task_results.items():  # goal corresponds to each task
     for reg_type, metrics in reg_dict.items():  # reg_type corresponds to each regularization technique
-        if isinstance(metrics["average_reward"], list):
-            avg_reward = np.mean(
-                metrics["average_reward"])  # or just use metrics["average_reward"][0] for the first element
+        # Check for "average_reward" and compute scalar values if present
+        if "average_reward" in metrics:
+            if isinstance(metrics["average_reward"], list):
+                avg_reward = np.mean(metrics["average_reward"])  # Compute the mean if it's a list
+            else:
+                avg_reward = metrics["average_reward"]  # Otherwise, use the scalar value directly
         else:
-            avg_reward = metrics["average_reward"]
+            avg_reward = float('nan')  # Default to NaN if missing
+
+        # Check for "std_reward"
+        if "std_reward" in metrics:
+            if isinstance(metrics["std_reward"], list):
+                std_reward = np.std(metrics["std_reward"])  # Compute the std if it's a list
+            else:
+                std_reward = metrics["std_reward"]  # Otherwise, use the scalar value directly
+        else:
+            std_reward = float('nan')  # Default to NaN if missing
+
+        # Check for "average_duration"
+        if "average_duration" in metrics:
+            if isinstance(metrics["average_duration"], list):
+                avg_duration = np.mean(metrics["average_duration"])  # Compute the mean if it's a list
+            else:
+                avg_duration = metrics["average_duration"]  # Otherwise, use the scalar value directly
+        else:
+            avg_duration = float('nan')  # Default to NaN if missing
+
         # Log metrics for each task and reg_type in TensorBoard
-        general_writer.add_scalar(f"Task/{goal}/Avg_Reward/{reg_type}", metrics["average_reward"])
-        general_writer.add_scalar(f"Task/{goal}/Avg_Duration/{reg_type}", metrics["average_duration"])
-        general_writer.add_scalar(f"Task/{goal}/Std_Reward/{reg_type}", metrics["std_reward"])
+        general_writer.add_scalar(f"{goal}/{reg_type}/Avg_Reward", avg_reward)
+        general_writer.add_scalar(f"{goal}/{reg_type}/Std_Reward", std_reward)
+        general_writer.add_scalar(f"{goal}/{reg_type}/Avg_Duration", avg_duration)
 
+        # Print the values for clarity
         print(f"Task: {goal}, Regularization: {reg_type} -> "
-              f"Avg Reward: {metrics['average_reward']:.2f}, "
-              f"Std Reward: {metrics['std_reward']:.2f}, "
-              f"Avg Duration: {metrics['average_duration']:.2f}")
-
-# for goal, reg_dict in task_results.items():
-#     for reg_type, metrics in reg_dict.items():
-#         flattened_task_results.append({
-#             'Goal': goal,
-#             'Regularization Type': reg_type,
-#             'Average Reward': np.mean(metrics['average_reward']),
-#             'Action Distribution': np.mean(metrics['action_distribution'], axis=0),
-#         })
+              f"Avg Reward: {avg_reward:.2f}, "
+              f"Std Reward: {std_reward:.2f}, "
+              f"Avg Duration: {avg_duration:.2f}")
 
 # Convert to DataFrame
 flattened_task_results_df = pd.DataFrame(flattened_task_results)
@@ -890,7 +904,7 @@ def validate_agent(agent, env, validation_goals, num_episodes=5, timeout=45):
                     break
 
                 # Log progress in each step
-                print(f"  Episode {episode + 1}, Step {episode_steps}, Elapsed Time: {elapsed_time:.2f}s")
+                # print(f"  Episode {episode + 1}, Step {episode_steps}, Elapsed Time: {elapsed_time:.2f}s")
                 action = select_action(state, epsilon=0, q_network=agent)
                 next_state, reward, done, _, _ = env.step(action)
 
@@ -1032,17 +1046,23 @@ structured_testing_results = structured_testing(q_network, env, testing_scenario
 
 # Log structured testing results to TensorBoard and display them
 for scenario_name, results in structured_testing_results.items():
-    # Log each result to TensorBoard for later visualization
-    general_writer.add_scalar(f"Testing/{scenario_name}/Average_Reward", results["average_reward"])
-    general_writer.add_scalar(f"Testing/{scenario_name}/Average_Duration", results["average_duration"])
-    general_writer.add_scalar(f"Testing/{scenario_name}/Std_Reward", results["std_reward"])
-    print(f"{scenario_name} - Avg Reward: {results['average_reward']:.2f}, "
-          f"Std Reward: {results['std_reward']:.2f}, Avg Duration: {results['average_duration']:.2f}")
+    # Check if required keys exist in results (to avoid KeyError)
+    if all(key in results for key in ["average_reward", "average_duration", "std_reward"]):
+        # Log each result to TensorBoard for later visualization
+        general_writer.add_scalar(f"Testing/{scenario_name}/Average_Reward", results["average_reward"])
+        general_writer.add_scalar(f"Testing/{scenario_name}/Average_Duration", results["average_duration"])
+        general_writer.add_scalar(f"Testing/{scenario_name}/Std_Reward", results["std_reward"])
+
+        # Print out for monitoring in the console
+        print(f"{scenario_name} - Avg Reward: {results['average_reward']:.2f}, "
+              f"Std Reward: {results['std_reward']:.2f}, Avg Duration: {results['average_duration']:.2f}")
+    else:
+        print(f"Missing keys in results for scenario: {scenario_name}. Skipping TensorBoard logging.")
 
 # Ensure task_results is properly initialized for goal, scenario, and regularization type
 for scenario_name, results in structured_testing_results.items():
     for goal in results:
-        for reg_type in regularization_types:  # Add regularization type here
+        for reg_type in regularization_types:  # Loop over all regularization types
             # Initialize the task (goal) if it's not already in task_results
             if goal not in task_results:
                 task_results[goal] = {}
@@ -1056,11 +1076,13 @@ for scenario_name, results in structured_testing_results.items():
                 task_results[goal][scenario_name][reg_type] = {}
 
             # Store the results for the given goal, scenario, and regularization type
-            task_results[goal][scenario_name][reg_type] = results[scenario_name]
-
+            task_results[goal][scenario_name][reg_type] = {
+                "average_reward": results.get("average_reward", float('nan')),
+                "std_reward": results.get("std_reward", float('nan')),
+                "average_duration": results.get("average_duration", float('nan'))
+            }
 
 # --- Compare Across Regularization Techniques ---
-
 def compare_regularization_techniques(results, regularization_types):
     comparison_results = {}
     metrics = ["rewards", "convergence_speed", "retention_score", "noise_resilience"]
@@ -1206,6 +1228,7 @@ print("Average Episode Durations:", testing_results["average_duration"])
 
 # --- Save all excel files ---
 # Consolidate all results into a single dictionary
+# Consolidate all results into a single dictionary
 consolidated_results = {
     "epoch_details": epoch_details,  # From the training loop
     "validation_results": validation_results,  # From validation phase
@@ -1217,107 +1240,86 @@ consolidated_results = {
     "task_results": flattened_task_results_df,  # Storing the flattened task results DataFrame
 }
 
+# Function to make objects serializable
+def make_serializable(obj):
+    if isinstance(obj, pd.DataFrame):
+        # Convert DataFrame to dictionary
+        return obj.to_dict(orient='records')
+    elif isinstance(obj, list):
+        # Recursively apply the function for lists
+        return [make_serializable(item) for item in obj]
+    elif isinstance(obj, dict):
+        # Recursively apply the function for dictionaries
+        return {key: make_serializable(value) for key, value in obj.items()}
+    else:
+        return obj  # For other types, just return as-is
+
+# Make results serializable and save them to JSON
+serializable_results = make_serializable(consolidated_results)
+
 # Save the consolidated results to a single JSON file
 with open("results.json", "w") as f:
-    json.dump(consolidated_results, f, indent=4)
+    json.dump(serializable_results, f, indent=4)
 
 print("All results consolidated and saved to 'results.json'")
 
-# --- Save all results to Excel ---
-with pd.ExcelWriter('results.xlsx', engine='openpyxl') as writer:
-    # Convert and save 'epoch_details' if it's a list of dictionaries (common after training)
-    if 'epoch_details' in consolidated_results:
-        epoch_df = pd.DataFrame(consolidated_results['epoch_details'])
-        epoch_df.to_excel(writer, sheet_name='Epoch Details', index=False)
+# Prepare all results for Excel export
+all_results = []
 
-with pd.ExcelWriter('results-tasks.xlsx', engine='openpyxl') as writer:
-    for task, reg_data in task_results.items():
-        for reg_type, metrics in reg_data.items():
-            df = pd.DataFrame(metrics)
-            df.to_excel(writer, sheet_name=f"{task}_{reg_type}", index=False)
+# Flatten the 'epoch_details' if it's a list of dictionaries
+if 'epoch_details' in consolidated_results:
+    epoch_df = pd.DataFrame(consolidated_results['epoch_details'])
+    epoch_df['Source'] = 'Epoch Details'
+    all_results.append(epoch_df)
 
-with pd.ExcelWriter('consolidated_results.xlsx', engine='openpyxl') as writer:
-    # Loop through the consolidated results and save each one to a separate sheet
-    for key, data in consolidated_results.items():
-        if isinstance(data, pd.DataFrame):  # If it's a DataFrame (e.g., flattened task results)
-            data.to_excel(writer, sheet_name=key, index=False)
-        elif isinstance(data, dict) or isinstance(data, list):
-            # If data is a dictionary or list, convert it to DataFrame
-            if isinstance(data, dict):
-                # If it's a dictionary, convert it into a DataFrame (possibly with index for keys)
-                data_df = pd.DataFrame([data], index=[0])
-            else:
-                # If it's a list (e.g., epoch_details, structured_testing_results), convert to DataFrame
-                data_df = pd.DataFrame(data)
+# Flatten the 'validation_results' if it's a dictionary
+if 'validation_results' in consolidated_results:
+    validation_df = pd.DataFrame([consolidated_results['validation_results']])
+    validation_df['Source'] = 'Validation Results'
+    all_results.append(validation_df)
 
-            # Write the DataFrame to an Excel sheet named after the key
-            data_df.to_excel(writer, sheet_name=key, index=False)
+# Flatten the 'convergence_results' if it's a dictionary/list
+if 'convergence_results' in consolidated_results:
+    convergence_df = pd.DataFrame(consolidated_results['convergence_results'])
+    convergence_df['Source'] = 'Convergence Results'
+    all_results.append(convergence_df)
 
-    # Convert and save 'validation_results' if it's in a dictionary/list format
-    if 'validation_results' in consolidated_results:
-        validation_results = consolidated_results.get('validation_results', {})
-        # If validation_results is a dictionary of scalar values, you can pass an index to it
-        if isinstance(validation_results, dict):
-            validation_df = pd.DataFrame([validation_results], index=[0])
-        else:
-            validation_df = pd.DataFrame(validation_results)
+# Flatten the 'structured_testing_results'
+if 'structured_testing_results' in consolidated_results:
+    structured_testing_df = pd.DataFrame(consolidated_results['structured_testing_results'])
+    structured_testing_df['Source'] = 'Structured Testing Results'
+    all_results.append(structured_testing_df)
 
-        validation_df.to_excel(writer, sheet_name='Validation Results', index=False)
+# Flatten the 'testing_results' if it's a dictionary/list
+if 'testing_results' in consolidated_results:
+    testing_df = pd.DataFrame(consolidated_results['testing_results'])
+    testing_df['Source'] = 'Testing Results'
+    all_results.append(testing_df)
 
-    # Convert and save 'convergence_results' if it's a list or dictionary
-    if 'convergence_results' in consolidated_results:
-        convergence_df = pd.DataFrame(consolidated_results['convergence_results'])
-        convergence_df.to_excel(writer, sheet_name='Convergence Results', index=False)
+# Flatten 'task_results' and convert into DataFrame (considering it as a nested dictionary)
+if 'task_results' in consolidated_results:
+    task_results_df = pd.DataFrame(consolidated_results['task_results'])
+    task_results_df['Source'] = 'Task Results'
+    all_results.append(task_results_df)
 
-    # Convert and save 'structured_testing_results'
-    if 'structured_testing_results' in consolidated_results:
-        structured_testing_df = pd.DataFrame(consolidated_results['structured_testing_results'])
-        structured_testing_df.to_excel(writer, sheet_name='Structured Testing', index=False)
+# Flatten other results (comparison, action_distributions, etc.) similarly
+if 'comparison_results' in consolidated_results:
+    comparison_df = pd.DataFrame(consolidated_results['comparison_results'])
+    comparison_df['Source'] = 'Comparison Results'
+    all_results.append(comparison_df)
 
-    # Convert and save 'comparison_results'
-    if 'comparison_results' in consolidated_results:
-        comparison_df = pd.DataFrame(consolidated_results['comparison_results'])
-        comparison_df.to_excel(writer, sheet_name='Comparison Results', index=False)
+if 'action_distributions' in consolidated_results:
+    action_distributions_df = pd.DataFrame(consolidated_results['action_distributions'])
+    action_distributions_df['Source'] = 'Action Distributions'
+    all_results.append(action_distributions_df)
 
-    # Convert and save 'testing_results'
-    if 'testing_results' in consolidated_results:
-        testing_df = pd.DataFrame(consolidated_results['testing_results'])
-        testing_df.to_excel(writer, sheet_name='Testing Results', index=False)
+# Concatenate all results into one DataFrame
+final_df = pd.concat(all_results, ignore_index=True)
 
-    # Convert and save 'action_distributions'
-    if 'action_distributions' in consolidated_results:
-        action_distributions_df = pd.DataFrame(consolidated_results['action_distributions'])
-        action_distributions_df.to_excel(writer, sheet_name='Action Distributions', index=False)
+# Save the final DataFrame to a single Excel sheet
+final_df.to_excel('results.xlsx', index=False)
 
-# Notify that the results were saved successfully
 print("All results saved to 'results.xlsx'")
 
 # Close the environment after testing
 env.close()
-
-'''RQ1: How do different regularization techniques (such as L1, L2, dropout, and weight decay) influence the task-specific performance metrics—including accuracy, convergence speed, and knowledge retention of multiple tasks—of a modular DQN agent when rapidly switching between tasks, particularly in the presence of sensor-based state noise?
-RQ2: How does the combination of promising sensor-based state noise with parameter noise regularization impact the long-term adaptability and learning stability of a modular DQN agent?
-
-I’m exploring the idea of dynamically combining task-specific regularization techniques with a modular DQN agent. The novelty lies in adapting the regularization type to the specific task the agent is solving, which can potentially improve performance across multiple metrics.
-
-For example:
-For Task 1, the agent uses dropout.
-For Task 2, it switches to L1 regularization.
-For Task 3, the agent uses weight decay.
-
-This dynamic approach contrasts with the static use of a single regularization technique for all tasks. I’m planning on designing these experimental setups:
-1.	Baseline: The agent switches tasks without any specific regularization focus.
-2.	Regularized Task Switching: Each task consistently uses the same assigned regularization technique throughout the experiment.
-3.	Randomized Task Switching: The agent initially selects a new regularization technique every new task.
-4.	Structured Task Switching: The agent randomly selects a new regularization technique every time a task is revisited, then keeps in memory which regularization technique is applied to every task.
-Additionally, I’ll vary the noise levels and test how this adaptive regularization impacts stability and robustness in these scenarios.
-The goal is to determine whether task-specific regularization improves performance compared to static or randomized approaches, especially in challenging environments with noise. 
-
-ALL 1-500 FOLLOW THESE RULES
-EVERY 50 EPISODES SHLD BE NEW TASK
-KEEP SAME FOR ALL EXPERIMENTS
-Test all reg techniques
-Test cyclical (1-4 is randomized then defined)
-Test randomized every epoch
-
-'''
