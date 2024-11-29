@@ -769,12 +769,12 @@ for reg_type in regularization_types:
         task_results[goal][reg_type]['action_distribution'].append(action_distribution)
 
         # Save results to TensorBoard
-        eval_step = 0
-        general_writer.add_scalar(f"Training/Avg_Reward/{goal}/{reg_type}", avg_reward, eval_step)
+        # eval_step = 0
+        # general_writer.add_scalar(f"Training/Avg_Reward/{goal}/{reg_type}", avg_reward, eval_step)
         # for i, count in enumerate(action_distribution):
         #     general_writer.add_scalar(f"Training/Action_Distribution/{goal}/{reg_type}/Action_{i}", count, eval_step)
 
-        eval_step += 1
+        # eval_step += 1
 
 # Optionally, store results using pickle
 with open("task_results.pkl", "wb") as f:
@@ -829,10 +829,6 @@ for goal, reg_dict in task_results.items():  # goal corresponds to each task
 
 # Convert to DataFrame
 flattened_task_results_df = pd.DataFrame(flattened_task_results)
-
-# Saving the flattened task results to Excel
-with pd.ExcelWriter('consolidated_results.xlsx', engine='openpyxl') as writer:
-    flattened_task_results_df.to_excel(writer, sheet_name='Task Results', index=False)
 
 # Plot task-specific average rewards per regularization type
 print("\n--- Evaluation Phase ---")
@@ -1039,7 +1035,6 @@ def structured_testing(agent, env, noise_scenarios, num_episodes=5, max_steps=50
             f"Scenario: {scenario['name']}, Avg Reward: {avg_reward:.2f}, Std Reward: {std_reward:.2f}, Avg Duration: {avg_duration:.2f}")
 
     return testing_results
-
 
 # Call the structured_testing function to get results for each scenario
 structured_testing_results = structured_testing(q_network, env, testing_scenarios, num_episodes=5, max_steps=500)
@@ -1279,10 +1274,39 @@ if 'validation_results' in consolidated_results:
     all_results.append(validation_df)
 
 # Flatten the 'convergence_results' if it's a dictionary/list
+# Ensure that all dictionaries in 'convergence_results' have the same keys
+def normalize_convergence_results(results):
+    # Get the union of all keys from each dictionary
+    all_keys = set()
+
+    # Check if each item in results is a dictionary, otherwise skip
+    for result in results:
+        if isinstance(result, dict):
+            all_keys.update(result.keys())
+        else:
+            print(f"Warning: Skipping non-dictionary item: {result}")
+
+    # Add missing keys to each dictionary with a default value of None
+    normalized_results = []
+    for result in results:
+        if isinstance(result, dict):
+            normalized_result = result.copy()  # Make a copy to avoid modifying the original
+            for key in all_keys:
+                if key not in normalized_result:
+                    normalized_result[key] = None  # You can choose a different placeholder if needed
+            normalized_results.append(normalized_result)
+        else:
+            # You can decide how to handle non-dictionary results
+            normalized_results.append(None)  # Append None or handle accordingly
+
+    return normalized_results
+
+# Apply the normalization function to 'convergence_results'
 if 'convergence_results' in consolidated_results:
-    convergence_df = pd.DataFrame(consolidated_results['convergence_results'])
-    convergence_df['Source'] = 'Convergence Results'
-    all_results.append(convergence_df)
+    print("Convergence Results: " + str(consolidated_results['convergence_results']))
+    print(consolidated_results['convergence_results'])
+    consolidated_results['convergence_results'] = normalize_convergence_results(
+        consolidated_results['convergence_results'])
 
 # Flatten the 'structured_testing_results'
 if 'structured_testing_results' in consolidated_results:
