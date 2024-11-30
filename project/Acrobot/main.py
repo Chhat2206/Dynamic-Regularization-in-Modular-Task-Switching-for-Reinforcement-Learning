@@ -553,6 +553,9 @@ def get_next_reg(episode, cycle_length=4):
 
     return reg_type
 
+validation_log = []
+validation_results_history = []
+
 for episode in range(num_episodes):
     q_network.train()
     state, _ = env.reset()
@@ -644,10 +647,16 @@ for episode in range(num_episodes):
         print(f"\n--- Periodic Validation at Episode {episode} ---")
         validation_results = validate_agent(q_network, env, validation_goals, num_episodes=3)
 
-        # Log validation results to TensorBoard
+        validation_results_history.append({
+            "episode": episode,
+            "validation_results": validation_results
+        })
+
+        # Log validation results to TensorBoard and append to validation_log
         for goal, avg_reward in validation_results.items():
             if avg_reward is not None:  # Only log if the result is valid
                 general_writer.add_scalar(f"Validation/Average_Reward/{goal}", avg_reward, episode)
+                validation_log.append({"episode": episode, "goal": goal, "average_reward": avg_reward})
             else:
                 print(f"Skipping TensorBoard log for goal '{goal}' because validation failed or timed out.")
 
@@ -862,7 +871,6 @@ for reg_type in regularization_types:
     print(f"Avg Reward per Goal for {reg_type}: {avg_rewards_per_goal}")
 
 env.close()
-
 
 # --- Validation Phase ---
 # Validation Phase: Evaluate agent on unseen tasks or conditions
@@ -1223,7 +1231,6 @@ print("Average Episode Durations:", testing_results["average_duration"])
 
 # --- Save all excel files ---
 # Consolidate all results into a single dictionary
-# Consolidate all results into a single dictionary
 consolidated_results = {
     "epoch_details": epoch_details,  # From the training loop
     "validation_results": validation_results,  # From validation phase
@@ -1267,14 +1274,43 @@ if 'epoch_details' in consolidated_results:
     epoch_df['Source'] = 'Epoch Details'
     all_results.append(epoch_df)
 
-# Flatten the 'validation_results' if it's a dictionary
-if 'validation_results' in consolidated_results:
-    validation_df = pd.DataFrame([consolidated_results['validation_results']])
-    validation_df['Source'] = 'Validation Results'
+# Flatten the 'validation_results_history' for every 50 episodes
+if validation_results_history:
+    validation_results_flat = []
+
+    for entry in validation_results_history:
+        # For each episode in the history, flatten the 'validation_results' dictionary and include episode
+        flat_entry = {'episode': entry['episode']}
+        flat_entry.update(entry['validation_results'])  # Add the goal-reward pairs as columns
+        validation_results_flat.append(flat_entry)
+
+    validation_df = pd.DataFrame(validation_results_flat)
+    validation_df['Source'] = 'Validation Results (every 50 episodes)'
     all_results.append(validation_df)
 
+# Flatten the 'validation_results' if it's a dictionary (single snapshot of validation results)
+if 'validation_results' in consolidated_results:
+    # Check if 'validation_results' is a dictionary and print its structure
+    validation_results_flat = []
+
+    print("---- Debugging Validation Results ----")
+    print(f"Validation Results: {consolidated_results['validation_results']}")
+    print("-------------------------------------------------")
+
+    if isinstance(consolidated_results['validation_results'], dict):
+        # Each entry in 'validation_results' is a goal-reward pair
+        for goal, reward in consolidated_results['validation_results'].items():
+            # Create a flat entry for each validation goal and its reward
+            flat_entry = {'goal': goal, 'average_reward': reward}
+            validation_results_flat.append(flat_entry)
+
+        validation_df = pd.DataFrame(validation_results_flat)
+        validation_df['Source'] = 'Validation Results (Single Snapshot)'
+        all_results.append(validation_df)
+    else:
+        print("Validation results are not in the expected format. Skipping this step.")
+
 # Flatten the 'convergence_results' if it's a dictionary/list
-# Ensure that all dictionaries in 'convergence_results' have the same keys
 def normalize_convergence_results(results):
     # Get the union of all keys from each dictionary
     all_keys = set()
