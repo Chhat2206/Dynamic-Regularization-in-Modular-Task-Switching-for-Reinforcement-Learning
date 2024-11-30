@@ -15,7 +15,6 @@ from collections import deque
 import time
 import pandas as pd
 from torch.utils.tensorboard import SummaryWriter
-import json
 import datetime
 
 # Create the environment
@@ -183,7 +182,6 @@ print(f"Training with device: {device}")
 action_distributions = {}
 possible_actions = [0, 1, 2]
 
-
 # Evaluate agent on the given goal/environment
 def evaluate_agent(env, q_network, num_episodes=5, goal="original"):
     total_rewards = []
@@ -309,7 +307,6 @@ def evaluate_knowledge_retention(agent, env, learned_tasks, num_episodes=5):
         print(f"Knowledge Retention - Task: {task}, Avg Reward: {avg_reward}")
     return retention_rewards
 
-
 # Function to evaluate long-term adaptability
 def evaluate_long_term_adaptability(agent, env, tasks, num_episodes=5, max_eval_steps=300, early_stop_threshold=-200):
     adaptability_rewards = {}
@@ -407,8 +404,6 @@ hyperparams = {
     "batch_size": batch_size,
     "num_episodes": num_episodes,
 }
-general_writer.add_text("Hyperparameters", json.dumps(hyperparams))
-
 
 def validate_agent(agent, env, validation_goals, num_episodes=5, timeout=30):
     validation_results = {}
@@ -556,6 +551,9 @@ def get_next_reg(episode, cycle_length=4):
 validation_log = []
 validation_results_history = []
 
+rolling_avg_rewards = []
+rolling_std_rewards = []
+
 for episode in range(num_episodes):
     q_network.train()
     state, _ = env.reset()
@@ -678,6 +676,10 @@ for episode in range(num_episodes):
         writers[reg_type].add_scalar(f"{reg_type}/Rolling_Avg_Reward", rolling_avg_reward, episode)
         writers[reg_type].add_scalar(f"{reg_type}/Rolling_Std_Reward", rolling_std_reward, episode)
 
+        episode_count = episode
+        rolling_avg_rewards.append(rolling_avg_reward)
+        rolling_std_rewards.append(rolling_std_reward)
+
     # Log success rate if applicable
     if len(results[reg_type]["task_rewards"][current_goal]) >= window_size:
         success_rate = calculate_success_rate(results[reg_type]["task_rewards"][current_goal], convergence_threshold)
@@ -788,10 +790,6 @@ for reg_type in regularization_types:
 # Optionally, store results using pickle
 with open("task_results.pkl", "wb") as f:
     pickle.dump(task_results, f)
-
-# Optionally, save results to JSON
-with open("task_results.json", "w") as f:
-    json.dump(task_results, f, indent=4)
 
 flattened_task_results = []
 
@@ -982,7 +980,6 @@ testing_scenarios = [
     },
 ]
 
-
 def structured_testing(agent, env, noise_scenarios, num_episodes=5, max_steps=500):
     testing_results = {}
 
@@ -1109,7 +1106,6 @@ def compare_regularization_techniques(results, regularization_types):
 
     return comparison_results
 
-
 # Run comparison
 comparison_results = compare_regularization_techniques(results, regularization_types)
 
@@ -1220,7 +1216,6 @@ for i, noise_level in enumerate(testing_results["noise_level"]):
     print(f"  Average Reward: {testing_results['average_reward'][i]:.2f}")
     print(f"  Standard Deviation of Reward: {testing_results['std_reward'][i]:.2f}")
     print(f"  Average Episode Duration: {testing_results['average_duration'][i]:.2f} seconds")
-    print()
 
 # Summary statistics for interpretation
 print("\n--- Summary Statistics for Testing Phase ---")
@@ -1240,30 +1235,24 @@ consolidated_results = {
     "testing_results": testing_results,  # Noise resilience testing results
     "action_distributions": action_distributions,  # Action distributions
     "task_results": flattened_task_results_df,  # Storing the flattened task results DataFrame
+    "episode": range(window_size, episode_count + 1),
+    "rolling_avg_reward": rolling_avg_rewards,
+    "rolling_std_reward": rolling_std_rewards
 }
 
-# Function to make objects serializable
-def make_serializable(obj):
-    if isinstance(obj, pd.DataFrame):
-        # Convert DataFrame to dictionary
-        return obj.to_dict(orient='records')
-    elif isinstance(obj, list):
-        # Recursively apply the function for lists
-        return [make_serializable(item) for item in obj]
-    elif isinstance(obj, dict):
-        # Recursively apply the function for dictionaries
-        return {key: make_serializable(value) for key, value in obj.items()}
-    else:
-        return obj  # For other types, just return as-is
-
-# Make results serializable and save them to JSON
-serializable_results = make_serializable(consolidated_results)
-
-# Save the consolidated results to a single JSON file
-with open("results.json", "w") as f:
-    json.dump(serializable_results, f, indent=4)
-
-print("All results consolidated and saved to 'results.json'")
+# # Function to make objects serializable
+# def make_serializable(obj):
+#     if isinstance(obj, pd.DataFrame):
+#         # Convert DataFrame to dictionary
+#         return obj.to_dict(orient='records')
+#     elif isinstance(obj, list):
+#         # Recursively apply the function for lists
+#         return [make_serializable(item) for item in obj]
+#     elif isinstance(obj, dict):
+#         # Recursively apply the function for dictionaries
+#         return {key: make_serializable(value) for key, value in obj.items()}
+#     else:
+#         return obj  # For other types, just return as-is
 
 # Prepare all results for Excel export
 all_results = []
@@ -1372,6 +1361,8 @@ if 'action_distributions' in consolidated_results:
     action_distributions_df = pd.DataFrame(consolidated_results['action_distributions'])
     action_distributions_df['Source'] = 'Action Distributions'
     all_results.append(action_distributions_df)
+
+
 
 # Concatenate all results into one DataFrame
 final_df = pd.concat(all_results, ignore_index=True)
