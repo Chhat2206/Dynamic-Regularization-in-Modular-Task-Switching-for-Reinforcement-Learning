@@ -26,9 +26,9 @@ is_rq1 = True  # Set this to True to evaluate RQ1, and automatically set RQ2 to 
 is_rq2 = not is_rq1
 mode = "none"  # Options are "none", "cyclic_task_switching", "randomized_task_switching"
 goals = ["quick_recovery", "periodic_swing", "maintain_balance"]
+fixed_reg_type = "dropout"  # Choose from ["dropout", "l1", "l2", "batch_norm"]
 
 # Hyperparameters
-
 learning_rate = 0.0001  # Slightly lower for more stable learning, OG: 0.00025 is REALLY BAD
 gamma = 0.99
 epsilon = 1.0  # Exploration rate
@@ -39,7 +39,9 @@ replay_buffer_size = 1000000  # Increased to allow more diverse experiences
 replay_buffer = deque(maxlen=replay_buffer_size)
 num_episodes = 500  # Increased number of episodes, OG: 500
 target_update_frequency = 500
-convergence_threshold = -100
+performance_threshold = -100
+stability_threshold = 0.01
+window_size = 50
 eval_interval = 50
 # Training episodes with task switching
 parameter_noise_stddev = 0.1  # Standard deviation for parameter noise (for RQ2)
@@ -54,7 +56,6 @@ def shape_reward(state, next_state, reward):
     if next_state[1] > state[1]:  # if the vertical position increases
         reward += 0.5  # Provide a small positive reward for progress
     return reward
-
 
 # Neural network for DQN
 class DQN(nn.Module):
@@ -97,7 +98,6 @@ def get_goal_reward(reward, state, goal):
     elif goal == "maintain_balance":
         return reward + (1.0 - abs(state[0]))  # Reward maintaining the top link at a horizontal position
     return reward
-
 
 # Function to add noise to state
 def add_noise_to_state(state, noise_level=0.1):
@@ -248,18 +248,15 @@ task_switching_phase_rewards = []
 
 performance_log = {goal: {"rewards": [], "convergence_speed": []} for goal in goals}
 performance_log["original"] = {"rewards": [], "convergence_speed": []}
-window_size = 50
 task_switch_rewards = []
 task_switch_count = 0
 total_steps = 0
-
 
 # Function to determine if agent has converged
 def is_converged(rewards, threshold, window_size=10):
     if len(rewards) < window_size:
         return False
     return np.mean(rewards[-window_size:]) >= threshold
-
 
 def add_parameter_noise(model, stddev=0.1):
     with torch.no_grad():  # We don't want to learn or change weights permanently here
@@ -342,15 +339,10 @@ def evaluate_long_term_adaptability(agent, env, tasks, num_episodes=5, max_eval_
 
     return adaptability_rewards
 
-
-# If mode is "none", define the fixed regularization type here (e.g., "l1" or "dropout")
-fixed_reg_type = "dropout"  # Choose from ["dropout", "l1", "l2", "batch_norm"]
-
 # Validation check for mode and regularization types
 if mode == "none" and fixed_reg_type not in ["dropout", "l1", "l2", "batch_norm"]:
     raise ValueError(
         "Invalid fixed_reg_type provided for mode 'none'. Please choose from ['dropout', 'l1', 'l2', 'batch_norm']")
-
 
 # Define the function to validate single regularization type
 def validate_single_reg_type(q_network, target_network, expected_reg_type):
@@ -554,11 +546,48 @@ validation_results_history = []
 rolling_avg_rewards = []
 rolling_std_rewards = []
 
+cumulative_rewards = 0
+previous_cumulative_rewards = 0
+convergence_speeds = []
+
+# Check if the agent has converged
+def check_convergence(task_rewards, performance_threshold, window_size):
+    # Check if task_rewards meets the convergence criteria
+    if len(task_rewards) >= window_size:
+        # Compute the rolling average of the last `window_size` rewards
+        rolling_rewards = task_rewards[-window_size:]
+        avg_reward = np.mean(rolling_rewards)
+        std_reward = np.std(rolling_rewards)
+
+        # Check if the average reward is greater than the performance threshold
+        # and if the standard deviation is below a threshold indicating stability
+        is_converged = avg_reward >= performance_threshold and std_reward < 0.01
+
+        # Return a flag indicating convergence and the countdown to convergence
+        countdown = max(0, window_size - len(task_rewards))  # Countdown to full window size
+        return is_converged, countdown
+
+    # If not enough rewards to check, return False for convergence and an arbitrary countdown
+    return False, None
+
+# Initialize lists to track convergence and stabilization details
+convergence_details = []
+stabilization_details = []
+
+# Function to check convergence based on stabilization (rolling standard deviation of rewards)
+def check_stabilization(episode_rewards, window_size, stabilization_threshold=0.01):
+    if len(episode_rewards) >= window_size:
+        rolling_std_reward = np.std(episode_rewards[-window_size:])
+        return rolling_std_reward < stabilization_threshold  # Check if std dev is below threshold
+    return False
+
 for episode in range(num_episodes):
     q_network.train()
     state, _ = env.reset()
     total_reward = 0
     done = False
+
+    start_time = time.time()
 
     # Determine current task using the updated logic
     current_goal = get_current_task(episode + 1)
@@ -658,9 +687,11 @@ for episode in range(num_episodes):
             else:
                 print(f"Skipping TensorBoard log for goal '{goal}' because validation failed or timed out.")
 
-    # Log convergence speed under the correct regularization type
-    convergence_speed = is_converged(episode_rewards, convergence_threshold)
-    writers[reg_type].add_scalar(f"{reg_type}/Convergence_Speed/{current_goal}", convergence_speed, episode)
+    cumulative_rewards += total_reward # # Update cumulative rewards and calculate convergence speed
+    convergence_speed = cumulative_rewards - previous_cumulative_rewards # Calculate convergence speed as the change in cumulative rewards from the previous episode
+    convergence_speeds.append(convergence_speed)
+    writers[reg_type].add_scalar(f"{reg_type}/Convergence_Speed/{current_goal}", convergence_speed, episode) # Log the convergence speed to TensorBoard
+    previous_cumulative_rewards = cumulative_rewards # Update previous cumulative rewards for the next episode
 
     # Log total rewards for the episode
     writers[reg_type].add_scalar(f"{reg_type}/Episode Reward", total_reward, episode)
@@ -682,16 +713,30 @@ for episode in range(num_episodes):
 
     # Log success rate if applicable
     if len(results[reg_type]["task_rewards"][current_goal]) >= window_size:
-        success_rate = calculate_success_rate(results[reg_type]["task_rewards"][current_goal], convergence_threshold)
+        success_rate = calculate_success_rate(results[reg_type]["task_rewards"][current_goal], performance_threshold)
         writers[reg_type].add_scalar(f"{reg_type}/{current_goal}_Success Rate", success_rate, episode)
 
     # Log convergence speed if task is converged
-    if is_converged(results[reg_type]["task_rewards"][current_goal], convergence_threshold, window_size):
+    if is_converged(results[reg_type]["task_rewards"][current_goal], performance_threshold, window_size):
         writers[reg_type].add_scalar(f"{reg_type}/Convergence Speed/{current_goal}",
                                      current_task_episode_count[current_goal], episode)
 
     # Track the number of episodes taken to converge
     current_task_episode_count[current_goal] += 1
+
+    end_time = time.time()
+    episode_duration = end_time - start_time
+
+    is_converged_flag, countdown = check_convergence(results[reg_type]["task_rewards"][current_goal], performance_threshold, window_size)
+
+    if is_converged_flag:
+        if current_task_episode_count[current_goal] == 0:
+            print(f"--- Convergence Starting for goal '{current_goal}' at episode {episode + 1} ---")
+        else:
+            print(f"Goal '{current_goal}' has been converging. Countdown: {countdown} episodes remaining.")
+
+    # Log convergence speed and stability
+    stabilization_flag = check_stabilization(episode_rewards, window_size)
 
     # Store per-episode details
     epoch_details.append({
@@ -700,16 +745,30 @@ for episode in range(num_episodes):
         "Regularization Type": reg_type,
         "Total Reward": total_reward,
         "Epsilon": epsilon,
-        "Convergence Episodes": current_task_episode_count[current_goal]
+        "Convergence Episodes": current_task_episode_count[current_goal] if is_converged_flag else 0,
+        "Countdown to Convergence": countdown if countdown is not None else "N/A",
+        "Convergence Speed": convergence_speed,
+        "Convergence Reached": is_converged_flag,
+        "Episode Duration (s)": episode_duration,
+        "Rolling Avg Reward": np.mean(episode_rewards[-window_size:]),
+        "Rolling Std Reward": np.std(episode_rewards[-window_size:]),
+        "Stabilized": stabilization_flag,
     })
 
-    # Check if the current task has converged using task-specific reward history
-    if is_converged(results[reg_type]["task_rewards"][current_goal][-window_size:], convergence_threshold):
-        convergence_log[current_goal].append(current_task_episode_count[current_goal])
+    # Check for task convergence
+    if is_converged(results[reg_type]["task_rewards"][current_goal], performance_threshold, window_size):
+        if current_task_episode_count[current_goal] == 0:
+            # Log the episode count when convergence is first detected
+            convergence_log[current_goal].append(current_task_episode_count[current_goal])
+
+    # Increment task episode count only after convergence
+    current_task_episode_count[current_goal] += 1
+
+    # Log convergence speed to TensorBoard
+    writers[reg_type].add_scalar(f"{reg_type}/Convergence Speed/{current_goal}", convergence_speed, episode)
 
     # Print progress every episode
-    print(
-        f"Episode: {episode + 1}/{num_episodes}, Goal: {current_goal}, Total Reward: {total_reward}, Epsilon: {epsilon:.3f}, Regularization: {reg_type}")
+    print(f"Episode: {episode + 1}/{num_episodes}, Goal: {current_goal}, Total Reward: {total_reward}, Epsilon: {epsilon:.3f}, Regularization: {reg_type}, Duration: {episode_duration:.2f} seconds")
 
 epoch_details_df = pd.DataFrame(epoch_details)
 
@@ -1229,7 +1288,8 @@ print("Average Episode Durations:", testing_results["average_duration"])
 consolidated_results = {
     "epoch_details": epoch_details,  # From the training loop
     "validation_results": validation_results,  # From validation phase
-    "convergence_results": convergence_log,  # Convergence speed results
+    "convergence_results": [],  # Convergence results
+    "episode_duration": episode_duration,
     "structured_testing_results": structured_testing_results,  # Structured testing phase results
     "comparison_results": comparison_results,  # Regularization comparison
     "testing_results": testing_results,  # Noise resilience testing results
@@ -1237,24 +1297,9 @@ consolidated_results = {
     "task_results": flattened_task_results_df,  # Storing the flattened task results DataFrame
     "episode": range(window_size, episode_count + 1),
     "rolling_avg_reward": rolling_avg_rewards,
-    "rolling_std_reward": rolling_std_rewards
+    "rolling_std_reward": rolling_std_rewards,
 }
 
-# # Function to make objects serializable
-# def make_serializable(obj):
-#     if isinstance(obj, pd.DataFrame):
-#         # Convert DataFrame to dictionary
-#         return obj.to_dict(orient='records')
-#     elif isinstance(obj, list):
-#         # Recursively apply the function for lists
-#         return [make_serializable(item) for item in obj]
-#     elif isinstance(obj, dict):
-#         # Recursively apply the function for dictionaries
-#         return {key: make_serializable(value) for key, value in obj.items()}
-#     else:
-#         return obj  # For other types, just return as-is
-
-# Prepare all results for Excel export
 all_results = []
 
 # Flatten the 'epoch_details' if it's a list of dictionaries
@@ -1299,39 +1344,55 @@ if 'validation_results' in consolidated_results:
     else:
         print("Validation results are not in the expected format. Skipping this step.")
 
-# Flatten the 'convergence_results' if it's a dictionary/list
+# Normalize convergence results to ensure they have consistent keys across all tasks
 def normalize_convergence_results(results):
-    # Get the union of all keys from each dictionary
     all_keys = set()
 
-    # Check if each item in results is a dictionary, otherwise skip
+    # Collect all unique keys from the dictionary
     for result in results:
         if isinstance(result, dict):
             all_keys.update(result.keys())
         else:
             print(f"Warning: Skipping non-dictionary item: {result}")
 
-    # Add missing keys to each dictionary with a default value of None
+    # Normalize all dictionaries in the list to have the same keys
     normalized_results = []
     for result in results:
         if isinstance(result, dict):
-            normalized_result = result.copy()  # Make a copy to avoid modifying the original
+            normalized_result = result.copy()
             for key in all_keys:
                 if key not in normalized_result:
-                    normalized_result[key] = None  # You can choose a different placeholder if needed
+                    normalized_result[key] = None  # Use None or another placeholder
             normalized_results.append(normalized_result)
         else:
-            # You can decide how to handle non-dictionary results
-            normalized_results.append(None)  # Append None or handle accordingly
+            normalized_results.append(None)  # Handle non-dictionary results here
 
     return normalized_results
 
-# Apply the normalization function to 'convergence_results'
-if 'convergence_results' in consolidated_results:
-    print("Convergence Results: " + str(consolidated_results['convergence_results']))
-    print(consolidated_results['convergence_results'])
-    consolidated_results['convergence_results'] = normalize_convergence_results(
-        consolidated_results['convergence_results'])
+# Flatten convergence results
+def flatten_convergence_results(convergence_log):
+    flattened_results = []
+    for goal, details in convergence_log.items():
+        for entry in details:  # Assuming each entry in 'details' represents an episode's convergence info
+            flattened_entry = {
+                'goal': goal,
+                'episode': entry.get('episode', None),  # Ensure that each entry has an 'episode' field
+                'reward': entry.get('reward', None),
+                'converged': entry.get('converged', None),
+                'convergence_episode': entry.get('convergence_episode', None)
+            }
+            flattened_results.append(flattened_entry)
+    return flattened_results
+
+# Normalize and flatten convergence results before adding to consolidated_results
+if 'convergence_results' in consolidated_results and len(consolidated_results['convergence_results']) > 0:
+    print("Normalizing Convergence Results...")
+    normalized_convergence = normalize_convergence_results(consolidated_results['convergence_results'])
+    flattened_convergence = flatten_convergence_results(normalized_convergence)
+    consolidated_results['convergence_results'] = flattened_convergence
+else:
+    print("No convergence results found, skipping normalization and flattening.")
+
 
 # Flatten the 'structured_testing_results'
 if 'structured_testing_results' in consolidated_results:
@@ -1362,15 +1423,10 @@ if 'action_distributions' in consolidated_results:
     action_distributions_df['Source'] = 'Action Distributions'
     all_results.append(action_distributions_df)
 
-
-
-# Concatenate all results into one DataFrame
 final_df = pd.concat(all_results, ignore_index=True)
-
-# Save the final DataFrame to a single Excel sheet
-final_df.to_excel('results.xlsx', index=False)
-
-print("All results saved to 'results.xlsx'")
+filename = f"results_{'rq1' if is_rq1 else 'rq2'}_{mode}.xlsx"
+final_df.to_excel(filename, index=False)
+print(f"All results saved to '{filename}'")
 
 # Close the environment after testing
 env.close()
