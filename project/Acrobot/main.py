@@ -385,7 +385,7 @@ hyperparams = {
     "num_episodes": num_episodes,
 }
 
-def validate_agent(agent, env, validation_goals, num_episodes=5, timeout=30):
+def validate_agent(agent, env, validation_goals, num_episodes=5, timeout=15):
     validation_results = {}
 
     for goal in validation_goals:
@@ -536,7 +536,6 @@ cumulative_rewards = 0
 previous_cumulative_rewards = 0
 convergence_speeds = []
 
-
 # Check if the agent has converged
 def check_convergence(task_rewards, performance_threshold, window_size):
     if len(task_rewards) >= window_size:
@@ -547,7 +546,7 @@ def check_convergence(task_rewards, performance_threshold, window_size):
 
         # Check if the average reward is greater than the performance threshold
         # and if the standard deviation is below a threshold indicating stability
-        is_converged = avg_reward >= performance_threshold and std_reward < 0.01
+        is_converged = avg_reward >= performance_threshold and std_reward < 50
 
         # Calculate the countdown to convergence
         countdown = max(0, window_size - len(task_rewards))  # Countdown to full window size
@@ -570,6 +569,7 @@ def check_stabilization(episode_rewards, window_size, stabilization_threshold=0.
         return rolling_std_reward < stabilization_threshold  # Check if std dev is below threshold
     return False
 
+episode_count = 0
 # --- Training Loop ---
 print("Training Loop")
 for episode in range(num_episodes):
@@ -724,8 +724,8 @@ for episode in range(num_episodes):
         "Convergence Speed": convergence_speed,
         "Convergence Reached": is_converged_flag,
         "Episode Duration (s)": episode_duration,
-        "Rolling Avg Reward": np.mean(episode_rewards[-window_size:]),
-        "Rolling Std Reward": np.std(episode_rewards[-window_size:]),
+        "Rolling Avg Reward": rolling_avg_reward,
+        "Rolling Std Reward": rolling_std_reward,
         "Stabilized": stabilization_flag,
     })
 
@@ -786,69 +786,6 @@ for reg_type in regularization_types:
     # Only keep goals with valid convergence data (not inf)
     valid_goals = [goal for i, goal in enumerate(valid_goals) if avg_convergence_speeds[i] != float('inf')]
     avg_convergence_speeds = [speed for speed in avg_convergence_speeds if speed != float('inf')]
-
-# Update the results dictionary to track by task first
-task_results = {}
-
-# Plotting average rewards per task per regularization type
-for reg_type in regularization_types:
-    for goal in goals + ["original"]:  # Assuming 'goals' is a list of tasks
-        avg_reward, action_distribution = evaluate_agent(env, q_network, num_episodes=5, goal=goal)
-
-        # Track the results by task and regularization type
-        if goal not in task_results:
-            task_results[goal] = {}
-
-        if reg_type not in task_results[goal]:
-            task_results[goal][reg_type] = {'average_reward': [], 'convergence_speed': [], 'action_distribution': []}
-
-        task_results[goal][reg_type]['average_reward'].append(avg_reward)
-        task_results[goal][reg_type]['action_distribution'].append(action_distribution)
-
-# Optionally, store results using pickle
-with open("task_results.pkl", "wb") as f:
-    pickle.dump(task_results, f)
-
-flattened_task_results = []
-
-# Log structured testing results to TensorBoard for each task and reg_type
-for goal, reg_dict in task_results.items():  # goal corresponds to each task
-    for reg_type, metrics in reg_dict.items():  # reg_type corresponds to each regularization technique
-        # Check for "average_reward" and compute scalar values if present
-        if "average_reward" in metrics:
-            if isinstance(metrics["average_reward"], list):
-                avg_reward = np.mean(metrics["average_reward"])  # Compute the mean if it's a list
-            else:
-                avg_reward = metrics["average_reward"]  # Otherwise, use the scalar value directly
-        else:
-            avg_reward = float('nan')  # Default to NaN if missing
-
-        # Check for "std_reward"
-        if "std_reward" in metrics:
-            if isinstance(metrics["std_reward"], list):
-                std_reward = np.std(metrics["std_reward"])  # Compute the std if it's a list
-            else:
-                std_reward = metrics["std_reward"]  # Otherwise, use the scalar value directly
-        else:
-            std_reward = float('nan')  # Default to NaN if missing
-
-        # Check for "average_duration"
-        if "average_duration" in metrics:
-            if isinstance(metrics["average_duration"], list):
-                avg_duration = np.mean(metrics["average_duration"])  # Compute the mean if it's a list
-            else:
-                avg_duration = metrics["average_duration"]  # Otherwise, use the scalar value directly
-        else:
-            avg_duration = float('nan')  # Default to NaN if missing
-
-        # Print the values for clarity
-        print(f"Task: {goal}, Regularization: {reg_type} -> "
-              f"Avg Reward: {avg_reward:.2f}, "
-              f"Std Reward: {std_reward:.2f}, "
-              f"Avg Duration: {avg_duration:.2f}")
-
-# Convert to DataFrame
-flattened_task_results_df = pd.DataFrame(flattened_task_results)
 
 # Plot task-specific average rewards per regularization type
 print("\n--- Evaluation Phase ---")
@@ -1060,29 +997,6 @@ for scenario_name, results in structured_testing_results.items():
     else:
         print(f"Missing keys in results for scenario: {scenario_name}. Skipping TensorBoard logging.")
 
-# Ensure task_results is properly initialized for goal, scenario, and regularization type
-for scenario_name, results in structured_testing_results.items():
-    for goal in results:
-        for reg_type in regularization_types:  # Loop over all regularization types
-            # Initialize the task (goal) if it's not already in task_results
-            if goal not in task_results:
-                task_results[goal] = {}
-
-            # Initialize the scenario for the given goal (task) if not present
-            if scenario_name not in task_results[goal]:
-                task_results[goal][scenario_name] = {}
-
-            # Initialize the regularization type under the scenario if not present
-            if reg_type not in task_results[goal][scenario_name]:
-                task_results[goal][scenario_name][reg_type] = {}
-
-            # Store the results for the given goal, scenario, and regularization type
-            task_results[goal][scenario_name][reg_type] = {
-                "average_reward": results.get("average_reward", float('nan')),
-                "std_reward": results.get("std_reward", float('nan')),
-                "average_duration": results.get("average_duration", float('nan'))
-            }
-
 # --- Testing Phase ---
 # Load the trained model for evaluation and testing
 q_network.load_state_dict(torch.load("dqn_acrobot_model.pth", map_location=device))
@@ -1188,7 +1102,6 @@ consolidated_results = {
     "structured_testing_results": structured_testing_results,
     "testing_results": testing_results,
     "action_distributions": action_distributions,
-    "task_results": flattened_task_results_df,
     "episode": range(window_size, episode_count + 1),
     "rolling_avg_reward": rolling_avg_rewards,
     "rolling_std_reward": rolling_std_rewards,
@@ -1257,7 +1170,6 @@ result_keys = [
     ('epoch_details', 'Epoch Details'),
     ('structured_testing_results', 'Structured Testing Results'),
     ('testing_results', 'Testing Results'),
-    ('task_results', 'Task Results'),
     ('comparison_results', 'Comparison Results'),
     ('action_distributions', 'Action Distributions')
 ]
