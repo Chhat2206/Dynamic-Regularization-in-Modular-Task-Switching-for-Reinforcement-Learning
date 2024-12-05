@@ -33,7 +33,7 @@ replay_buffer = deque(maxlen=replay_buffer_size)
 num_episodes = 450
 target_update_frequency = 500
 stability_threshold = 0.01
-window_size = 2
+window_size = 10
 reward_window = collections.deque(maxlen=window_size)
 eval_interval = 50
 parameter_noise_stddev = 0.1  # Standard deviation for parameter noise (for RQ2)
@@ -333,7 +333,6 @@ def validate_single_reg_type(q_network, target_network, expected_reg_type):
         raise ValueError(
             f"Multiple regularization types detected. Only '{expected_reg_type}' is allowed for mode 'none'.")
 
-
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"CUDA Available: {torch.cuda.is_available()}")
 if torch.cuda.is_available():
@@ -367,8 +366,6 @@ episode_rewards = []  # Track rewards per episode
 task_to_reg = {}  # Dictionary to store the task for regularized task switching
 previous_goal = None
 epoch_details = []
-
-log_dir = f"runs/{mode}_{'RQ1' if is_rq1 else 'RQ2'}_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
 
 hyperparams = {
     "learning_rate": learning_rate,
@@ -477,27 +474,6 @@ validation_goals = [
     "noisy_swing_maximization",
 ]
 
-# Calculate success rate as the percentage of episodes where total reward >= threshold.
-def calculate_success_rate(task_rewards, window_size, task_goal):
-    if len(task_rewards) >= window_size:
-        # Compute the rolling average of the last `window_size` rewards
-        rolling_rewards = task_rewards[-window_size:]
-
-        # Get the fixed success threshold for the current task
-        goal_min = convergence_goals[task_goal] - 10
-        goal_max = convergence_goals[task_goal] + 10
-
-        # Count episodes where the reward is within the acceptable range
-        success_count = sum(1 for reward in rolling_rewards if goal_min <= reward <= goal_max)
-
-        # Success rate is the ratio of episodes where reward is within the range
-        success_rate = success_count / len(rolling_rewards)
-
-        return success_rate
-
-    return 0  # Return 0 if not enough data
-
-
 assigned_regularizations = set()
 task_to_reg = {}
 
@@ -548,7 +524,43 @@ convergence_goals = {
     "quick_recovery": -70
 }
 
-# Function to check convergence with updated rules
+
+def update_convergence_goal(task_rewards, task_goal):
+
+    # Sort the rewards in ascending order
+    temp_rewards = list(reward_window)
+    sorted_rewards = sorted(temp_rewards)
+
+    # Log the sorted rewards list for debugging
+    print(f"\n[DEBUG] Sorted Rewards for Task '{task_goal}': {sorted_rewards}")
+
+    # Calculate and log the median of the sorted rewards
+    print(f"[DEBUG] Calculating Median for Task '{task_goal}':")
+    print(f"  Sorted Rewards: {sorted_rewards}")
+
+    # Check if the list has an odd or even number of elements
+    if len(sorted_rewards) % 2 == 1:
+        # Odd number of elements, median is the middle element
+        median_value = sorted_rewards[len(sorted_rewards) // 2]
+        print(f"  [DEBUG] Odd number of elements, Median is the middle element: {median_value}")
+    else:
+        # Even number of elements, median is the average of the two middle elements
+        middle1 = sorted_rewards[len(sorted_rewards) // 2 - 1]
+        middle2 = sorted_rewards[len(sorted_rewards) // 2]
+        median_value = (middle1 + middle2) / 2
+        print(f"  [DEBUG] Even number of elements, Median is the average of the two middle elements:")
+        print(f"    ( {middle1} + {middle2} ) / 2 = {median_value}")
+
+    # Log the calculated median value
+    print(f"[DEBUG] Calculated Median Value: {median_value:.2f}")
+
+    # Update the convergence goal to the median value
+    print(f"[DEBUG] Updating Convergence Goal for Task '{task_goal}' to {median_value:.2f}")
+    convergence_goals[task_goal] = median_value
+
+    # Print the updated convergence goal
+    print(f"[DEBUG] Convergence goal for Task '{task_goal}' updated to: {median_value:.2f}")
+
 def check_convergence(task_rewards, window_size, task_goal):
     # Ensure there are enough rewards for the window size
     if len(task_rewards) >= window_size:
@@ -557,9 +569,14 @@ def check_convergence(task_rewards, window_size, task_goal):
         avg_reward = np.mean(rolling_rewards)
         std_reward = np.std(rolling_rewards)
 
+        # Check if the current average reward exceeds the threshold and update goal if necessary
+        if avg_reward >= convergence_goals[task_goal]:
+            # We only need to calculate the median and update once
+            update_convergence_goal(task_rewards, task_goal)
+
         # Define the goal range for convergence (±10 of the goal)
-        goal_min = convergence_goals[task_goal] - 10
-        goal_max = convergence_goals[task_goal] + 10
+        goal_min = convergence_goals[task_goal] - 10  # goal_min should be the goal minus 10
+        goal_max = 0
 
         # Check if the average reward is within the goal range
         is_converged = (avg_reward >= goal_min and avg_reward <= goal_max)
@@ -571,15 +588,38 @@ def check_convergence(task_rewards, window_size, task_goal):
         avg_reward = np.mean(task_rewards) if task_rewards else 0
         std_reward = np.std(task_rewards) if task_rewards else 0
 
+        # Check if the current average reward exceeds the threshold and update goal if necessary
+        if avg_reward >= convergence_goals[task_goal]:
+            update_convergence_goal(task_rewards, task_goal)
+
         # Define the goal range for convergence (±10 of the goal)
-        goal_min = convergence_goals[task_goal] - 10
-        goal_max = convergence_goals[task_goal] + 10
+        goal_min = convergence_goals[task_goal] - 10  # goal_min should be the goal minus 10
+        goal_max = 0  # goal_max should be the goal plus 10
 
         # Check convergence with current avg_reward and std_reward
         is_converged = (avg_reward >= goal_min and avg_reward <= goal_max)
 
         return is_converged, avg_reward, std_reward, goal_min, goal_max
 
+# Calculate success rate as the percentage of episodes where total reward >= threshold.
+def calculate_success_rate(task_rewards, window_size, task_goal):
+    if len(task_rewards) >= window_size:
+        # Compute the rolling average of the last `window_size` rewards
+        rolling_rewards = task_rewards[-window_size:]
+
+        # Get the fixed success threshold for the current task
+        goal_min = convergence_goals[task_goal] - 10
+        goal_max = 0
+
+        # Count episodes where the reward is within the acceptable range
+        success_count = sum(1 for reward in rolling_rewards if goal_min <= reward <= goal_max)
+
+        # Success rate is the ratio of episodes where reward is within the range
+        success_rate = success_count / len(rolling_rewards)
+
+        return success_rate
+
+    return 0  # Return 0 if not enough data
 
 # Initialize lists to track convergence and stabilization details
 convergence_details = []
@@ -670,6 +710,11 @@ for episode in range(num_episodes):
     episode_rewards.append(total_reward)
     rewards_log = {"episode": [], "reward": []}
 
+    episode_count += 1
+    if episode_count % 50 == 0:
+        print(f"Clearing reward_window after episode {episode_count}")
+        reward_window = collections.deque(maxlen=window_size)  # Reinitialize the deque
+
     # After appending total_reward
     rewards_log["episode"].append(episode + 1)
     rewards_log["reward"].append(total_reward)
@@ -691,7 +736,6 @@ for episode in range(num_episodes):
     convergence_speeds.append(convergence_speed)  # Append speed to log
 
     previous_cumulative_rewards = cumulative_rewards  # Update previous cumulative rewards
-    # print(f"[DEBUG] Convergence Speed | Goal: {current_goal}, Speed: {convergence_speed:.2f}, " f"Cumulative Rewards: {cumulative_rewards:.2f}")
 
     # Log rolling average and standard deviation
     if len(reward_window) >= window_size:
@@ -699,14 +743,14 @@ for episode in range(num_episodes):
         rolling_std_reward = np.std(reward_window)
 
         # Display the current reward window for debugging purposes
-    #     print(f"Episode {episode + 1}: Current Reward Window: {list(reward_window)}")
-    #     print(f"Rolling Average Reward (last {window_size} episodes): {rolling_avg_reward:.2f}")
-    #     print(f"Rolling Standard Deviation of Reward (last {window_size} episodes): {rolling_std_reward:.2f}")
-    # else:
-    #     # If the window size is not reached yet, you can print a placeholder or skip the log
-    #     print(f"Episode {episode + 1}: Current Reward Window: {list(reward_window)}")
-    #     print(f"Rolling Average Reward (last {window_size} episodes): Not yet available")
-    #     print(f"Rolling Standard Deviation of Reward (last {window_size} episodes): Not yet available")
+        print(f"[DEBUG] Episode {episode + 1}: Current Reward Window: {list(reward_window)}")
+        print(f"[DEBUG] Rolling Average Reward (last {window_size} episodes): {rolling_avg_reward:.2f}")
+        print(f"[DEBUG] Rolling Standard Deviation of Reward (last {window_size} episodes): {rolling_std_reward:.2f}")
+    else:
+        # If the window size is not reached yet, you can print a placeholder or skip the log
+        print(f"[DEBUG] Episode {episode + 1}: Current Reward Window: {list(reward_window)}")
+        print(f"[DEBUG] Rolling Average Reward (last {window_size} episodes): Not yet available")
+        print(f"[DEBUG] Rolling Standard Deviation of Reward (last {window_size} episodes): Not yet available")
 
     # Log success rate if applicable
     if len(results[reg_type]["task_rewards"][current_goal]) >= window_size:
@@ -733,10 +777,18 @@ for episode in range(num_episodes):
     goal_min_str = f"{goal_min:.2f}" if goal_min is not None else "N/A"
     goal_max_str = f"{goal_max:.2f}" if goal_max is not None else "N/A"
 
-    # Print the debug info for convergence check
+    # Check for convergence
+    is_converged_flag, avg_reward_check, std_reward_check, goal_min, goal_max = check_convergence(
+        results[reg_type]["task_rewards"][current_goal], window_size, current_goal)
+
+    if is_converged_flag:
+        # Ensure the current goal is updated if convergence condition is met
+        print(f"[DEBUG] Convergence condition met for task '{current_goal}'. Updating convergence goal if needed.")
+        update_convergence_goal(results[reg_type]["task_rewards"][current_goal], current_goal)
+
     print(f"[DEBUG] Convergence Check | Goal: {current_goal}, "
-          f"Avg Reward: {avg_reward_check_str}, Std Reward: {std_reward_check_str}, "
-          f"Goal Range: ({goal_min_str}, {goal_max_str}), "
+          f"Avg Reward: {avg_reward_check:.2f}, Std Reward: {std_reward_check:.2f}, "
+          f"Goal Range: ({goal_min:.2f}, {goal_max:.2f}), "
           f"Converged: {is_converged_flag}")
 
     # Log convergence speed and stability
@@ -902,7 +954,6 @@ def validate_agent(agent, env, validation_goals, num_episodes=5, timeout=45):
             print(f"Validation - Goal: {goal}, Avg Reward: {avg_reward}")
 
     return validation_results
-
 
 # Run the validation phase
 print("\n--- Validation Phase ---")
