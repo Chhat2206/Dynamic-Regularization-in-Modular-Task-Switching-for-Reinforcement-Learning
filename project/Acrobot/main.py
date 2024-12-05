@@ -1,5 +1,4 @@
 #!pip install gymnasium
-# !pip install tensorboard
 import collections
 import pickle
 from matplotlib import pyplot as plt
@@ -14,10 +13,7 @@ import time
 import pandas as pd
 import datetime
 
-# Create the environment
 env = gym.make("Acrobot-v1")
-
-# Set goals for custom task-switching
 use_custom_goals = True  # Set False to train all episodes under the original goal in all episodes
 is_rq1 = True  # Set this to True to evaluate RQ1, and automatically set RQ2 to False
 is_rq2 = not is_rq1
@@ -26,25 +22,22 @@ goals = ["quick_recovery", "periodic_swing", "maintain_balance"]
 fixed_reg_type = "dropout"  # Choose from ["dropout", "l1", "l2", "batch_norm"]
 
 # Hyperparameters
-learning_rate = 0.0001  # Slightly lower for more stable learning, OG: 0.00025 is REALLY BAD
+learning_rate = 0.0001
 gamma = 0.99
 epsilon = 1.0  # Exploration rate
-epsilon_decay = 0.995  # Slower decay from 0.995 to allow more exploration
+epsilon_decay = 0.995
 min_epsilon = 0.01
-batch_size = 128  # Recommended 128 or 256, prof says 32 has valuable research
-replay_buffer_size = 1000000  # Increased to allow more diverse experiences
+batch_size = 128
+replay_buffer_size = 1000000
 replay_buffer = deque(maxlen=replay_buffer_size)
-num_episodes = 500  # Increased number of episodes, OG: 500
+num_episodes = 450
 target_update_frequency = 500
-performance_threshold = -100
 stability_threshold = 0.01
-window_size = 50
+window_size = 2
 reward_window = collections.deque(maxlen=window_size)
 eval_interval = 50
-# Training episodes with task switching
 parameter_noise_stddev = 0.1  # Standard deviation for parameter noise (for RQ2)
 
-# Timing variables
 training_start_time = time.time()
 
 # Reward shaping function
@@ -385,7 +378,7 @@ hyperparams = {
     "num_episodes": num_episodes,
 }
 
-def validate_agent(agent, env, validation_goals, num_episodes=5, timeout=15):
+def validate_agent(agent, env, validation_goals, num_episodes=5, timeout=10):
     validation_results = {}
 
     for goal in validation_goals:
@@ -485,24 +478,39 @@ validation_goals = [
 ]
 
 # Calculate success rate as the percentage of episodes where total reward >= threshold.
-def calculate_success_rate(rewards, threshold):
-    successes = [1 for r in rewards if r >= threshold]
-    return (sum(successes) / len(rewards)) * 100 if rewards else 0
+def calculate_success_rate(task_rewards, window_size, task_goal):
+    if len(task_rewards) >= window_size:
+        # Compute the rolling average of the last `window_size` rewards
+        rolling_rewards = task_rewards[-window_size:]
+
+        # Get the fixed success threshold for the current task
+        goal_min = convergence_goals[task_goal] - 10
+        goal_max = convergence_goals[task_goal] + 10
+
+        # Count episodes where the reward is within the acceptable range
+        success_count = sum(1 for reward in rolling_rewards if goal_min <= reward <= goal_max)
+
+        # Success rate is the ratio of episodes where reward is within the range
+        success_rate = success_count / len(rolling_rewards)
+
+        return success_rate
+
+    return 0  # Return 0 if not enough data
+
 
 assigned_regularizations = set()
 task_to_reg = {}
 
 tasks = [
-    "original",        # Episodes 1-50'''
+    "original",        # Episodes 1-50
     "quick_recovery",  # Episodes 51-100
     "periodic_swing",  # Episodes 101-150
     "maintain_balance",# Episodes 151-200
     "original",        # Episodes 201-250
-    "maintain_balance",# Episodes 251-300
-    "quick_recovery",  # Episodes 301-350
-    "original",        # Episodes 351-400
-    "periodic_swing",  # Episodes 401-450
-    "maintain_balance" # Episodes 451-500
+    "quick_recovery",  # Episodes 251-300
+    "periodic_swing",  # Episodes 301-350
+    "maintain_balance",# Episodes 351-400
+    "original",        # Episodes 401-450
 ]
 
 # Function to determine current task based on episode number
@@ -526,37 +534,52 @@ def get_next_reg(episode, cycle_length=4):
 
     return reg_type
 
-validation_log = []
 validation_results_history = []
-
-rolling_avg_rewards = []
-rolling_std_rewards = []
-
 cumulative_rewards = 0
 previous_cumulative_rewards = 0
 convergence_speeds = []
 
-# Check if the agent has converged
-def check_convergence(task_rewards, performance_threshold, window_size):
+performance_threshold = -100
+
+convergence_goals = {
+    "original": -85,
+    "maintain_balance": -50,
+    "periodic_swing": -75,
+    "quick_recovery": -70
+}
+
+# Function to check convergence with updated rules
+def check_convergence(task_rewards, window_size, task_goal):
+    # Ensure there are enough rewards for the window size
     if len(task_rewards) >= window_size:
-        # Compute the rolling average of the last `window_size` rewards
+        # Compute the rolling average and standard deviation of the last `window_size` rewards
         rolling_rewards = task_rewards[-window_size:]
         avg_reward = np.mean(rolling_rewards)
         std_reward = np.std(rolling_rewards)
 
-        # Check if the average reward is greater than the performance threshold
-        # and if the standard deviation is below a threshold indicating stability
-        is_converged = avg_reward >= performance_threshold and std_reward < 50
+        # Define the goal range for convergence (±10 of the goal)
+        goal_min = convergence_goals[task_goal] - 10
+        goal_max = convergence_goals[task_goal] + 10
 
-        # Calculate the countdown to convergence
-        countdown = max(0, window_size - len(task_rewards))  # Countdown to full window size
+        # Check if the average reward is within the goal range
+        is_converged = (avg_reward >= goal_min and avg_reward <= goal_max)
 
-        # Log convergence details for diagnostics
-        print(f"[DEBUG] Convergence Check | Goal: {current_goal}, Avg Reward: {avg_reward:.2f}, "
-              f"Std Reward: {std_reward:.2f}, Converged: {is_converged}, Countdown: {countdown}")
+        return is_converged, avg_reward, std_reward, goal_min, goal_max
 
-        return is_converged, countdown
-    return False, "N/A"
+    else:
+        # If there aren't enough rewards yet, return average of available rewards so far
+        avg_reward = np.mean(task_rewards) if task_rewards else 0
+        std_reward = np.std(task_rewards) if task_rewards else 0
+
+        # Define the goal range for convergence (±10 of the goal)
+        goal_min = convergence_goals[task_goal] - 10
+        goal_max = convergence_goals[task_goal] + 10
+
+        # Check convergence with current avg_reward and std_reward
+        is_converged = (avg_reward >= goal_min and avg_reward <= goal_max)
+
+        return is_converged, avg_reward, std_reward, goal_min, goal_max
+
 
 # Initialize lists to track convergence and stabilization details
 convergence_details = []
@@ -570,6 +593,9 @@ def check_stabilization(episode_rewards, window_size, stabilization_threshold=0.
     return False
 
 episode_count = 0
+rolling_avg_reward = None
+rolling_std_reward = None
+
 # --- Training Loop ---
 print("Training Loop")
 for episode in range(num_episodes):
@@ -650,7 +676,6 @@ for episode in range(num_episodes):
     reward_window.append(total_reward) # Append the total reward of the episode into the reward window for tracking
     results[reg_type]["task_rewards"][current_goal].append(total_reward)
 
-    # Perform validation every eval_interval episodes
     if episode % eval_interval == 0 and episode > 0:
         print(f"\n--- Periodic Validation at Episode {episode} ---")
         validation_results = validate_agent(q_network, env, validation_goals, num_episodes=3)
@@ -660,46 +685,32 @@ for episode in range(num_episodes):
             "validation_results": validation_results
         })
 
-        # Log validation results to TensorBoard and append to validation_log
-        for goal, avg_reward in validation_results.items():
-            if avg_reward is not None:  # Only log if the result is valid
-                validation_log.append({"episode": episode, "goal": goal, "average_reward": avg_reward})
-            else:
-                print(f"Skipping TensorBoard log for goal '{goal}' because validation failed or timed out.")
-
     # Cumulative rewards and convergence speed tracking
     cumulative_rewards += total_reward  # Update cumulative rewards
     convergence_speed = cumulative_rewards - previous_cumulative_rewards  # Calculate convergence speed
     convergence_speeds.append(convergence_speed)  # Append speed to log
 
     previous_cumulative_rewards = cumulative_rewards  # Update previous cumulative rewards
-
-    # Debug log convergence speed
-    print(f"[DEBUG] Convergence Speed | Goal: {current_goal}, Speed: {convergence_speed:.2f}, "
-          f"Cumulative Rewards: {cumulative_rewards:.2f}")
+    # print(f"[DEBUG] Convergence Speed | Goal: {current_goal}, Speed: {convergence_speed:.2f}, " f"Cumulative Rewards: {cumulative_rewards:.2f}")
 
     # Log rolling average and standard deviation
     if len(reward_window) >= window_size:
         rolling_avg_reward = np.mean(reward_window)
         rolling_std_reward = np.std(reward_window)
 
-        # Track these rolling averages over episodes
-        rolling_avg_rewards.append(rolling_avg_reward)
-        rolling_std_rewards.append(rolling_std_reward)
-
         # Display the current reward window for debugging purposes
-        print(f"Episode {episode + 1}: Current Reward Window: {list(reward_window)}")
-        print(f"Rolling Average Reward (last {window_size} episodes): {rolling_avg_reward:.2f}")
-        print(f"Rolling Standard Deviation of Reward (last {window_size} episodes): {rolling_std_reward:.2f}")
-    else:
-        # If the window size is not reached yet, you can print a placeholder or skip the log
-        print(f"Episode {episode + 1}: Current Reward Window: {list(reward_window)}")
-        print(f"Rolling Average Reward (last {window_size} episodes): Not yet available")
-        print(f"Rolling Standard Deviation of Reward (last {window_size} episodes): Not yet available")
+    #     print(f"Episode {episode + 1}: Current Reward Window: {list(reward_window)}")
+    #     print(f"Rolling Average Reward (last {window_size} episodes): {rolling_avg_reward:.2f}")
+    #     print(f"Rolling Standard Deviation of Reward (last {window_size} episodes): {rolling_std_reward:.2f}")
+    # else:
+    #     # If the window size is not reached yet, you can print a placeholder or skip the log
+    #     print(f"Episode {episode + 1}: Current Reward Window: {list(reward_window)}")
+    #     print(f"Rolling Average Reward (last {window_size} episodes): Not yet available")
+    #     print(f"Rolling Standard Deviation of Reward (last {window_size} episodes): Not yet available")
 
     # Log success rate if applicable
     if len(results[reg_type]["task_rewards"][current_goal]) >= window_size:
-        success_rate = calculate_success_rate(results[reg_type]["task_rewards"][current_goal], performance_threshold)
+        success_rate = calculate_success_rate(results[reg_type]["task_rewards"][current_goal], window_size, current_goal)
 
     # Track the number of episodes taken to converge
     current_task_episode_count[current_goal] += 1
@@ -707,7 +718,26 @@ for episode in range(num_episodes):
     end_time = time.time()
     episode_duration = end_time - start_time
 
-    is_converged_flag, countdown = check_convergence(results[reg_type]["task_rewards"][current_goal], performance_threshold, window_size)
+    # Calculate rolling reward window and stats
+    current_rewards_window = results[reg_type]["task_rewards"][current_goal][-window_size:]
+    avg_reward = np.mean(current_rewards_window)
+    std_reward = np.std(current_rewards_window)
+
+    # Call the check_convergence function to check convergence
+    is_converged_flag, avg_reward_check, std_reward_check, goal_min, goal_max = check_convergence(
+        results[reg_type]["task_rewards"][current_goal], window_size, current_goal)
+
+    # Check if values are None and provide a default if so
+    avg_reward_check_str = f"{avg_reward_check:.2f}" if avg_reward_check is not None else "N/A"
+    std_reward_check_str = f"{std_reward_check:.2f}" if std_reward_check is not None else "N/A"
+    goal_min_str = f"{goal_min:.2f}" if goal_min is not None else "N/A"
+    goal_max_str = f"{goal_max:.2f}" if goal_max is not None else "N/A"
+
+    # Print the debug info for convergence check
+    print(f"[DEBUG] Convergence Check | Goal: {current_goal}, "
+          f"Avg Reward: {avg_reward_check_str}, Std Reward: {std_reward_check_str}, "
+          f"Goal Range: ({goal_min_str}, {goal_max_str}), "
+          f"Converged: {is_converged_flag}")
 
     # Log convergence speed and stability
     stabilization_flag = check_stabilization(episode_rewards, window_size)
@@ -719,8 +749,7 @@ for episode in range(num_episodes):
         "Regularization Type": reg_type,
         "Total Reward": total_reward,
         "Epsilon": epsilon,
-        "Convergence Episodes": current_task_episode_count[current_goal] if is_converged_flag else 0,
-        "Countdown to Convergence": countdown if countdown is not None else "N/A",
+        "Convergence Episodes": current_task_episode_count[current_goal],
         "Convergence Speed": convergence_speed,
         "Convergence Reached": is_converged_flag,
         "Episode Duration (s)": episode_duration,
@@ -729,13 +758,11 @@ for episode in range(num_episodes):
         "Stabilized": stabilization_flag,
     })
 
-    # Check if convergence has been reached
-    if is_converged(results[reg_type]["task_rewards"][current_goal], performance_threshold, window_size):
-        if current_task_episode_count[current_goal] == 0:
+    if is_converged_flag:
+        if current_task_episode_count[current_goal] == 1:
             # Log the first episode where convergence is detected
             print(f"[DEBUG] Task {current_goal} converged at episode {episode + 1}")
             convergence_log[current_goal].append(episode + 1)  # Log the first episode of convergence
-        # Continue to log every episode after convergence is detected
         current_task_episode_count[current_goal] += 1
 
     # Increment task episode count only after convergence
@@ -812,7 +839,6 @@ for reg_type in regularization_types:
         eval_step += 1  # Increment eval step after each goal evaluation
 
     print(f"Avg Reward per Goal for {reg_type}: {avg_rewards_per_goal}")
-
 env.close()
 
 # --- Validation Phase ---
@@ -988,15 +1014,6 @@ def structured_testing(agent, env, noise_scenarios, num_episodes=5, max_steps=50
 # Call the structured_testing function to get results for each scenario
 structured_testing_results = structured_testing(q_network, env, testing_scenarios, num_episodes=5, max_steps=500)
 
-# Log structured testing results to TensorBoard and display them
-for scenario_name, results in structured_testing_results.items():
-    # Check if required keys exist in results (to avoid KeyError)
-    if all(key in results for key in ["average_reward", "average_duration", "std_reward"]):
-        print(f"{scenario_name} - Avg Reward: {results['average_reward']:.2f}, "
-              f"Std Reward: {results['std_reward']:.2f}, Avg Duration: {results['average_duration']:.2f}")
-    else:
-        print(f"Missing keys in results for scenario: {scenario_name}. Skipping TensorBoard logging.")
-
 # --- Testing Phase ---
 # Load the trained model for evaluation and testing
 q_network.load_state_dict(torch.load("dqn_acrobot_model.pth", map_location=device))
@@ -1103,8 +1120,8 @@ consolidated_results = {
     "testing_results": testing_results,
     "action_distributions": action_distributions,
     "episode": range(window_size, episode_count + 1),
-    "rolling_avg_reward": rolling_avg_rewards,
-    "rolling_std_reward": rolling_std_rewards,
+    "rolling_avg_reward": rolling_avg_reward,
+    "rolling_std_reward": rolling_std_reward,
 }
 
 all_results = []
@@ -1200,7 +1217,6 @@ if 'validation_results' in consolidated_results and isinstance(consolidated_resu
 # Concatenate all DataFrames into one final DataFrame
 final_df = pd.concat(all_results, ignore_index=True)
 
-# Generate filename based on mode and other parameters
 filename = f"results_{'rq1' if is_rq1 else 'rq2'}_{mode if mode != 'none' else f'fixed_{fixed_reg_type}'}.xlsx"
 final_df.to_excel(filename, index=False)
 print(f"All results saved to '{filename}'")
