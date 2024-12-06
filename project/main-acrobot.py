@@ -1,6 +1,5 @@
 #!pip install gymnasium
 import collections
-import pickle
 from matplotlib import pyplot as plt
 import gymnasium as gym
 import numpy as np
@@ -94,46 +93,6 @@ def add_noise_to_state(state, noise_level=0.1):
     noisy_state = state + noise
     return np.clip(noisy_state, env.observation_space.low, env.observation_space.high)
 
-
-# Function to train the DQN using replay buffer
-def train_dqn(q_network, target_network, optimizer, reg_type):
-    if len(replay_buffer) < batch_size:
-        #     print(f"Insufficient samples in replay buffer ({len(replay_buffer)}). Waiting to collect more samples.")
-        return
-
-    # Sample random mini-batch
-    indices = np.random.choice(len(replay_buffer), batch_size, replace=False)
-    batch = [replay_buffer[i] for i in indices]
-    states, actions, rewards, next_states, dones = zip(*batch)
-    states = torch.tensor(np.array(states), dtype=torch.float32).to(device)
-    actions = torch.tensor(actions, dtype=torch.int64).unsqueeze(1).to(device)
-    rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1).to(device)
-    next_states = torch.tensor(np.array(next_states), dtype=torch.float32).to(device)
-    dones = torch.tensor(dones, dtype=torch.float32).unsqueeze(1).to(device)
-
-    # Compute the Q-values for current states
-    current_q_values = q_network(states).gather(1, actions)
-    assert current_q_values.requires_grad, "Q-values must require gradients for backward pass."
-
-    # Compute the target Q-values
-    with torch.no_grad():
-        next_q_values = target_network(next_states).max(1)[0].unsqueeze(1)
-        target_q_values = rewards + (1 - dones) * gamma * next_q_values
-
-    # Compute loss
-    loss = nn.MSELoss()(current_q_values, target_q_values)
-
-    # Add L1 regularization if applicable
-    if reg_type == "l1":
-        l1_loss = sum(torch.abs(param).sum() for param in q_network.parameters())
-        loss += 1e-4 * l1_loss
-
-    # Update the network
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
-
-
 # Initialize Q-network and target network
 input_dim = env.observation_space.shape[0]
 output_dim = env.action_space.n
@@ -168,13 +127,9 @@ retention_results = {
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Training with device: {device}")
 
-action_distributions = {}
-possible_actions = [0, 1, 2]
-
 # Evaluate agent on the given goal/environment
 def evaluate_agent(env, q_network, num_episodes=5, goal="original"):
     total_rewards = []
-    action_distribution = [0] * env.action_space.n  # Initialize action count for each action
 
     for episode in range(num_episodes):
         state, _ = env.reset()
@@ -190,7 +145,6 @@ def evaluate_agent(env, q_network, num_episodes=5, goal="original"):
                 next_state, reward, done, _, _ = env.step(action)
                 next_state = torch.tensor(next_state, dtype=torch.float32).to(device)
                 total_reward += reward
-                action_distribution[action] += 1  # Increment action count
                 state = next_state
                 step_count += 1
 
@@ -199,11 +153,8 @@ def evaluate_agent(env, q_network, num_episodes=5, goal="original"):
 
     avg_reward = np.mean(total_rewards)
     print(f"Average Reward after Evaluation for Goal '{goal}': {avg_reward}")
-    print(f"Action Distribution during Evaluation: {action_distribution}")
 
-    action_distributions[goal] = action_distribution
-    return avg_reward, action_distribution
-
+    return avg_reward
 
 def add_noise_to_action(action, num_actions, noise_probability=0.1):
     if random.random() < noise_probability:
@@ -246,13 +197,14 @@ def is_converged(rewards, threshold, window_size=10):
     return np.mean(rewards[-window_size:]) >= threshold
 
 def add_parameter_noise(model, stddev=0.1):
-    with torch.no_grad():  # We don't want to learn or change weights permanently here
+    if model is None:
+        raise ValueError("Model is None. Cannot add noise.")
+    with torch.no_grad():
         for param in model.parameters():
-            if param.requires_grad:  # Only change weights that are trainable
-                # Add a small random value (noise) to each weight
-                noise = torch.normal(mean=0.0, std=stddev, size=param.size()).to(param.device)
-                param.add_(noise)  # Apply the noise to the parameter
-
+            if param.requires_grad:
+                noise = torch.randn_like(param) * stddev
+                param.data.add_(noise)
+    return model
 
 # Dictionary to track convergence speed for each task
 convergence_log = {goal: [] for goal in goals + ["original"]}
@@ -341,14 +293,14 @@ print(f"\nTraining with Mode: {mode}")
 
 # Initialize model, target, optimizer, and replay buffer
 # In "none" mode, use the fixed regularization type for the entire experiment
-if mode == "none":
-    reg_type = fixed_reg_type
-else:
-    reg_type = None  # Placeholder to be set dynamically based on task-switching
+if mode == "none": reg_type = fixed_reg_type
+else: reg_type = None  # Placeholder to be set dynamically based on task-switching
 
 # Initialize Q-network and target network with the selected regularization type
 q_network = DQN(env.observation_space.shape[0], env.action_space.n, reg_type=reg_type).to(device)
+print(f"q_network after initialization: {q_network}")
 target_network = DQN(env.observation_space.shape[0], env.action_space.n, reg_type=reg_type).to(device)
+print(f"target_network initialized: {target_network}")
 
 # Ensure all parameters of the model have gradients enabled
 for name, param in q_network.named_parameters():
@@ -374,6 +326,52 @@ hyperparams = {
     "batch_size": batch_size,
     "num_episodes": num_episodes,
 }
+
+# Function to train the DQN using replay buffer
+def train_dqn(q_network, target_network, optimizer, reg_type, is_rq2=False, parameter_noise_stddev=0.1):
+    if len(replay_buffer) < batch_size:
+        # Insufficient samples in replay buffer
+        return
+
+    if q_network is None:
+        raise ValueError("q_network has not been initialized.")
+
+    # Apply parameter noise if is_rq2 is True
+    if is_rq2:
+        q_network = add_parameter_noise(q_network, stddev=parameter_noise_stddev)
+        # print("RQ2 is active")
+
+    # Sample random mini-batch from the replay buffer
+    indices = np.random.choice(len(replay_buffer), batch_size, replace=False)
+    batch = [replay_buffer[i] for i in indices]
+    states, actions, rewards, next_states, dones = zip(*batch)
+    states = torch.tensor(np.array(states), dtype=torch.float32).to(device)
+    actions = torch.tensor(actions, dtype=torch.int64).unsqueeze(1).to(device)
+    rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1).to(device)
+    next_states = torch.tensor(np.array(next_states), dtype=torch.float32).to(device)
+    dones = torch.tensor(dones, dtype=torch.float32).unsqueeze(1).to(device)
+
+    # Compute the Q-values for current states
+    current_q_values = q_network(states).gather(1, actions)
+    assert current_q_values.requires_grad, "Q-values must require gradients for backward pass."
+
+    # Compute the target Q-values using the target network
+    with torch.no_grad():
+        next_q_values = target_network(next_states).max(1)[0].unsqueeze(1)
+        target_q_values = rewards + (1 - dones) * gamma * next_q_values
+
+    # Compute loss using Mean Squared Error (MSE)
+    loss = nn.MSELoss()(current_q_values, target_q_values)
+
+    # Add L1 regularization if specified
+    if reg_type == "l1":
+        l1_loss = sum(torch.abs(param).sum() for param in q_network.parameters())
+        loss += 1e-4 * l1_loss
+
+    # Backpropagation and optimizer step
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
 
 def validate_agent(agent, env, validation_goals, num_episodes=5, timeout=10):
     validation_results = {}
@@ -565,9 +563,8 @@ def check_convergence(task_rewards, window_size, task_goal):
     # Ensure there are enough rewards for the window size
     if len(task_rewards) >= window_size:
         # Compute the rolling average and standard deviation of the last `window_size` rewards
-        rolling_rewards = task_rewards[-window_size:]
-        avg_reward = np.mean(rolling_rewards)
-        std_reward = np.std(rolling_rewards)
+        avg_reward = np.mean(reward_window)
+        std_reward = np.std(reward_window)
 
         # Check if the current average reward exceeds the threshold and update goal if necessary
         if avg_reward >= convergence_goals[task_goal]:
@@ -621,21 +618,7 @@ def calculate_success_rate(task_rewards, window_size, task_goal):
 
     return 0  # Return 0 if not enough data
 
-# Initialize lists to track convergence and stabilization details
-convergence_details = []
-stabilization_details = []
-
-# Function to check convergence based on stabilization (rolling standard deviation of rewards)
-def check_stabilization(episode_rewards, window_size, stabilization_threshold=0.01):
-    if len(episode_rewards) >= window_size:
-        rolling_std_reward = np.std(episode_rewards[-window_size:])
-        return rolling_std_reward < stabilization_threshold  # Check if std dev is below threshold
-    return False
-
 episode_count = 0
-rolling_avg_reward = None
-rolling_std_reward = None
-
 # --- Training Loop ---
 print("Training Loop")
 for episode in range(num_episodes):
@@ -684,23 +667,21 @@ for episode in range(num_episodes):
 
     # Run the episode
     while not done:
-        # Add noise to state during training if evaluating RQ2
-        if is_rq2: state = add_noise_to_state(state, noise_level=parameter_noise_stddev)
+
+        if is_rq2: q_network = add_parameter_noise(q_network, stddev=parameter_noise_stddev)
 
         action = q_network(torch.tensor(state, dtype=torch.float32).to(
             device)).argmax().item() if random.random() > epsilon else env.action_space.sample()
         next_state, reward, done, _, _ = env.step(action)
         reward = get_goal_reward(shape_reward(state, next_state, reward), state, current_goal)
 
-        # Add noise to next state if evaluating RQ2
-        if is_rq2: next_state = add_noise_to_state(next_state, noise_level=parameter_noise_stddev)
 
         replay_buffer.append((state, action, reward, next_state, done))
         total_steps += 1
         state = next_state
         total_reward += reward
         episode_rewards.append(reward)
-        train_dqn(q_network, target_network, optimizer, reg_type)
+        train_dqn(q_network, target_network, optimizer, reg_type, is_rq2=is_rq2, parameter_noise_stddev=parameter_noise_stddev)
 
         # Update the target network periodically
         if total_steps % target_update_frequency == 0: target_network.load_state_dict(q_network.state_dict())
@@ -737,25 +718,6 @@ for episode in range(num_episodes):
 
     previous_cumulative_rewards = cumulative_rewards  # Update previous cumulative rewards
 
-    # Log rolling average and standard deviation
-    if len(reward_window) >= window_size:
-        rolling_avg_reward = np.mean(reward_window)
-        rolling_std_reward = np.std(reward_window)
-
-        # Display the current reward window for debugging purposes
-        print(f"[DEBUG] Episode {episode + 1}: Current Reward Window: {list(reward_window)}")
-        print(f"[DEBUG] Rolling Average Reward (last {window_size} episodes): {rolling_avg_reward:.2f}")
-        print(f"[DEBUG] Rolling Standard Deviation of Reward (last {window_size} episodes): {rolling_std_reward:.2f}")
-    else:
-        # If the window size is not reached yet, you can print a placeholder or skip the log
-        print(f"[DEBUG] Episode {episode + 1}: Current Reward Window: {list(reward_window)}")
-        print(f"[DEBUG] Rolling Average Reward (last {window_size} episodes): Not yet available")
-        print(f"[DEBUG] Rolling Standard Deviation of Reward (last {window_size} episodes): Not yet available")
-
-    # Log success rate if applicable
-    if len(results[reg_type]["task_rewards"][current_goal]) >= window_size:
-        success_rate = calculate_success_rate(results[reg_type]["task_rewards"][current_goal], window_size, current_goal)
-
     # Track the number of episodes taken to converge
     current_task_episode_count[current_goal] += 1
 
@@ -791,9 +753,6 @@ for episode in range(num_episodes):
           f"Goal Range: ({goal_min:.2f}, {goal_max:.2f}), "
           f"Converged: {is_converged_flag}")
 
-    # Log convergence speed and stability
-    stabilization_flag = check_stabilization(episode_rewards, window_size)
-
     # Store per-episode details
     epoch_details.append({
         "Episode": episode + 1,
@@ -801,13 +760,11 @@ for episode in range(num_episodes):
         "Regularization Type": reg_type,
         "Total Reward": total_reward,
         "Epsilon": epsilon,
-        "Convergence Episodes": current_task_episode_count[current_goal],
-        "Convergence Speed": convergence_speed,
-        "Convergence Reached": is_converged_flag,
+        "Stability Reached": is_converged_flag,
+        "Minimum Goal": goal_min,
+        "Stability Avg Reward (Last 10 Episodes)": avg_reward,
+        "Stability Std Reward (Last 10 Episodes)": std_reward,
         "Episode Duration (s)": episode_duration,
-        "Rolling Avg Reward": rolling_avg_reward,
-        "Rolling Std Reward": rolling_std_reward,
-        "Stabilized": stabilization_flag,
     })
 
     if is_converged_flag:
@@ -832,62 +789,35 @@ if current_goal != "original" and current_goal not in previous_goals:
     for goal, score in retention_scores.items():
         retention_results[reg_type]["previous_goal_rewards"].setdefault(goal, []).append(score)
 
-# After training, analyze convergence speed for each task
-for goal in convergence_log:
-    if convergence_log[goal]:  # If there are convergence episodes logged
-        avg_convergence_speed = np.mean(convergence_log[goal])
-    else:
-        avg_convergence_speed = None  # Indicates no convergence occurred
-
-    # Print results for clarity
-    print(
-        f"Goal: {goal}, "
-        f"Average Convergence Speed: {avg_convergence_speed if avg_convergence_speed is not None else 'Did not converge'} episodes"
-    )
-
 # Training time tracking
 training_end_time = time.time()
 print(f"Total Training Time: {training_end_time - training_start_time:.2f} seconds")
 
 # Save trained model
 torch.save(q_network.state_dict(), "dqn_acrobot_model.pth")
-with open("performance_log.pkl", "wb") as f:
-    pickle.dump(results, f)
 
 # --- Metrics and Plotting ---
 # Improved Plotting of Average Convergence Speed per Task per Regularization Type
 for reg_type in regularization_types:
     # Filter valid goals that have convergence data
     valid_goals = [goal for goal in goals + ["original"] if len(convergence_log[goal]) > 0]
-    avg_convergence_speeds = [np.mean(convergence_log[goal]) if len(convergence_log[goal]) > 0 else float('inf') for
-                              goal in valid_goals]
-
     # Only keep goals with valid convergence data (not inf)
-    valid_goals = [goal for i, goal in enumerate(valid_goals) if avg_convergence_speeds[i] != float('inf')]
-    avg_convergence_speeds = [speed for speed in avg_convergence_speeds if speed != float('inf')]
+    # valid_goals = [goal for i, goal in enumerate(valid_goals) if avg_convergence_speeds[i] != float('inf')]
 
 # Plot task-specific average rewards per regularization type
 print("\n--- Evaluation Phase ---")
 for reg_type in regularization_types:
     print(f"Evaluating model with Regularization Type: {reg_type}")
 
-    if is_rq2:
-        # Add parameter noise before evaluation if we are assessing RQ2
-        add_parameter_noise(q_network, parameter_noise_stddev)
-
     eval_step = 0
     avg_rewards_per_goal = {}
     for goal in goals + ["original"]:
         # Evaluate agent and log action distribution
-        avg_reward, action_distribution = evaluate_agent(env, q_network, num_episodes=5, goal=goal)
-
-        # Convert action distribution (which is likely a list) to a NumPy array
-        action_distribution_np = np.array(action_distribution)
+        avg_reward = evaluate_agent(env, q_network, num_episodes=5, goal=goal)
 
         # Save average rewards for each goal
         avg_rewards_per_goal[goal] = avg_reward
         results[reg_type]["retention_score"].append(avg_reward)
-
         eval_step += 1  # Increment eval step after each goal evaluation
 
     print(f"Avg Reward per Goal for {reg_type}: {avg_rewards_per_goal}")
@@ -1057,13 +987,18 @@ def structured_testing(agent, env, noise_scenarios, num_episodes=5, max_steps=50
             "std_reward": std_reward,
         }
 
-        print(
-            f"Scenario: {scenario['name']}, Avg Reward: {avg_reward:.2f}, Std Reward: {std_reward:.2f}, Avg Duration: {avg_duration:.2f}")
 
     return testing_results
 
 # Call the structured_testing function to get results for each scenario
 structured_testing_results = structured_testing(q_network, env, testing_scenarios, num_episodes=5, max_steps=500)
+
+# Assuming structured_testing_results is the output of the function
+for scenario_name, result in structured_testing_results.items():
+    print(f"\n--- Results for Scenario: {scenario_name} ---")
+    print(f"Average Reward: {result['average_reward']:.2f}")
+    print(f"Average Duration (Steps): {result['average_duration']:.2f}")
+    print(f"Standard Deviation of Reward: {result['std_reward']:.2f}")
 
 # --- Testing Phase ---
 # Load the trained model for evaluation and testing
@@ -1165,14 +1100,12 @@ print("Average Episode Durations:", testing_results["average_duration"])
 consolidated_results = {
     "epoch_details": epoch_details,
     "validation_results": validation_results,
-    "convergence_results": [],
     "episode_duration": episode_duration,
     "structured_testing_results": structured_testing_results,
     "testing_results": testing_results,
-    "action_distributions": action_distributions,
     "episode": range(window_size, episode_count + 1),
-    "rolling_avg_reward": rolling_avg_reward,
-    "rolling_std_reward": rolling_std_reward,
+    "rolling_avg_reward": avg_reward,
+    "rolling_std_reward": std_reward,
 }
 
 all_results = []
@@ -1187,59 +1120,12 @@ def process_results(key, source_name, consolidated_results, all_results):
         else:
             print(f"Unexpected data type for key '{key}', expected list or dict.")
 
-def normalize_convergence_results(results):
-    """Normalize the convergence results to have consistent keys across all tasks."""
-    all_keys = set()
-    for result in results:
-        if isinstance(result, dict):
-            all_keys.update(result.keys())
-        else:
-            print(f"Warning: Skipping non-dictionary item: {result}")
-
-    normalized_results = []
-    for result in results:
-        if isinstance(result, dict):
-            normalized_result = result.copy()
-            for key in all_keys:
-                if key not in normalized_result:
-                    normalized_result[key] = None  # Use None or another placeholder
-            normalized_results.append(normalized_result)
-        else:
-            normalized_results.append(None)  # Handle non-dictionary results here
-
-    return normalized_results
-
-def flatten_convergence_results(convergence_log):
-    """Flatten convergence log data into a list of entries."""
-    flattened_results = []
-    for goal, details in convergence_log.items():
-        for entry in details:
-            flattened_entry = {
-                'goal': goal,
-                'episode': entry.get('episode', None),
-                'reward': entry.get('reward', None),
-                'converged': entry.get('converged', None),
-                'convergence_episode': entry.get('convergence_episode', None)
-            }
-            flattened_results.append(flattened_entry)
-    return flattened_results
-
-# Normalize and flatten convergence results if available
-if 'convergence_results' in consolidated_results and len(consolidated_results['convergence_results']) > 0:
-    print("Normalizing Convergence Results...")
-    normalized_convergence = normalize_convergence_results(consolidated_results['convergence_results'])
-    flattened_convergence = flatten_convergence_results(normalized_convergence)
-    consolidated_results['convergence_results'] = flattened_convergence
-else:
-    print("No convergence results found, skipping normalization and flattening.")
-
 # Define result keys and corresponding source names
 result_keys = [
-    ('epoch_details', 'Epoch Details'),
+    ('epoch_details', 'Epoch Details'), # Contains details about row A-L
     ('structured_testing_results', 'Structured Testing Results'),
     ('testing_results', 'Testing Results'),
     ('comparison_results', 'Comparison Results'),
-    ('action_distributions', 'Action Distributions')
 ]
 
 # Process and append each result type using the function
@@ -1267,10 +1153,8 @@ if 'validation_results' in consolidated_results and isinstance(consolidated_resu
 
 # Concatenate all DataFrames into one final DataFrame
 final_df = pd.concat(all_results, ignore_index=True)
-
 filename = f"results_{'rq1' if is_rq1 else 'rq2'}_{mode if mode != 'none' else f'fixed_{fixed_reg_type}'}.xlsx"
 final_df.to_excel(filename, index=False)
 print(f"All results saved to '{filename}'")
 
-# Close the environment after testing
 env.close()
