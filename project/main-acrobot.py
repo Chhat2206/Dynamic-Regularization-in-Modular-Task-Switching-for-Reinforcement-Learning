@@ -118,7 +118,7 @@ retention_results = {
     reg_type: {
         "retention_scores": [],
         "previous_goal_rewards": {},
-        "long_term_adaptability": {}  # Add this to store the long-term adaptability scores for each regularization type
+        "long_term_adaptability": {}
     } for reg_type in regularization_types
 }
 
@@ -729,10 +729,6 @@ for episode in range(num_episodes):
     avg_reward = np.mean(current_rewards_window)
     std_reward = np.std(current_rewards_window)
 
-    # Call the check_convergence function to check convergence
-    is_converged_flag, avg_reward_check, std_reward_check, goal_min, goal_max = check_convergence(
-        results[reg_type]["task_rewards"][current_goal], window_size, current_goal)
-
     # Check if values are None and provide a default if so
     avg_reward_check_str = f"{avg_reward_check:.2f}" if avg_reward_check is not None else "N/A"
     std_reward_check_str = f"{std_reward_check:.2f}" if std_reward_check is not None else "N/A"
@@ -824,66 +820,6 @@ for reg_type in regularization_types:
 env.close()
 
 # --- Validation Phase ---
-# Validation Phase: Evaluate agent on unseen tasks or conditions
-def validate_agent(agent, env, validation_goals, num_episodes=5, timeout=45):
-    validation_results = {}
-
-    for goal in validation_goals:
-        start_time = time.time()  # Record the start time for the goal
-        total_reward = 0
-        total_steps = 0
-        print(f"Start validating for goal: {goal}")
-
-        for episode in range(num_episodes):
-            # If the elapsed time exceeds the timeout, skip this goal
-            elapsed_time = time.time() - start_time
-            if elapsed_time > timeout:
-                print(
-                    f"Validation for goal '{goal}' took too long ({elapsed_time:.2f}s), skipping after {episode} episodes.")
-                validation_results[goal] = None  # Mark the goal as skipped
-                break  # Skip to the next goal
-
-            print(f"Starting Episode {episode + 1} for goal: {goal}")
-
-            state, _ = env.reset()  # Reset the environment and get the starting state
-            done = False
-            episode_reward = 0
-            episode_steps = 0
-
-            while not done:
-                # If time exceeds the limit while running an episode, abort early
-                elapsed_time = time.time() - start_time
-                if elapsed_time > timeout:
-                    print(f"Timeout during episode {episode + 1} for goal '{goal}', skipping...")
-                    validation_results[goal] = None
-                    break
-
-                # Log progress in each step
-                # print(f"  Episode {episode + 1}, Step {episode_steps}, Elapsed Time: {elapsed_time:.2f}s")
-                action = select_action(state, epsilon=0, q_network=agent)
-                next_state, reward, done, _, _ = env.step(action)
-
-                episode_reward += reward
-                episode_steps += 1
-                state = next_state
-
-                if elapsed_time > timeout:
-                    print(f"Timeout reached during step {episode_steps} of episode {episode + 1}.")
-                    validation_results[goal] = None
-                    break  # Break early if timeout is reached
-
-            if elapsed_time > timeout:
-                break  # If we broke early due to timeout, break the loop for this goal
-
-            total_reward += episode_reward
-            total_steps += episode_steps
-
-        if goal not in validation_results:  # Only add result if it wasn't skipped
-            avg_reward = total_reward / num_episodes
-            validation_results[goal] = avg_reward
-            print(f"Validation - Goal: {goal}, Avg Reward: {avg_reward}")
-
-    return validation_results
 
 # Run the validation phase
 print("\n--- Validation Phase ---")
@@ -987,11 +923,10 @@ def structured_testing(agent, env, noise_scenarios, num_episodes=5, max_steps=50
             "std_reward": std_reward,
         }
 
-
     return testing_results
 
 # Call the structured_testing function to get results for each scenario
-structured_testing_results = structured_testing(q_network, env, testing_scenarios, num_episodes=5, max_steps=500)
+structured_testing_results = structured_testing(q_network, env, testing_scenarios, num_episodes=50, max_steps=500)
 
 # Assuming structured_testing_results is the output of the function
 for scenario_name, result in structured_testing_results.items():
