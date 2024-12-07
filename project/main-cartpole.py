@@ -12,7 +12,7 @@ import time
 import pandas as pd
 import datetime
 
-env = gym.make("CartPole-v1", render_mode="human")
+env = gym.make("CartPole-v1")
 use_custom_goals = True  # Set False to train all episodes under the original goal in all episodes
 is_rq1 = True  # Set this to True to evaluate RQ1, and automatically set RQ2 to False
 is_rq2 = not is_rq1
@@ -40,11 +40,30 @@ parameter_noise_stddev = 0.1  # Standard deviation for parameter noise (for RQ2)
 training_start_time = time.time()
 
 # Reward shaping function
+import numpy as np
+
 def shape_reward(state, next_state, reward):
-    # Reward the agent for increasing the height of the tip of the second link
-    if next_state[1] > state[1]:  # if the vertical position increases
-        reward += 0.5  # Provide a small positive reward for progress
-    return reward
+    # Extract relevant state information
+    cart_position = next_state[0]
+    cart_velocity = next_state[1]
+    pole_angle = next_state[2]
+    pole_velocity = next_state[3]
+
+    # Penalize large cart position (keep the cart near the center)
+    cart_position_penalty = np.abs(cart_position) * 0.1  # Higher penalty for moving further from the center
+
+    # Penalize large pole angle (keep the pole upright)
+    pole_angle_penalty = np.abs(pole_angle) * 0.1  # Larger angle means higher penalty
+
+    # Penalize high velocities (keep the movements small)
+    cart_velocity_penalty = np.abs(cart_velocity) * 0.01  # Higher velocity means larger penalty
+    pole_velocity_penalty = np.abs(pole_velocity) * 0.01  # Larger pole velocity increases penalty
+
+    # Combine the penalties with the original reward (reward encourages balance)
+    shaped_reward = reward - (
+                cart_position_penalty + pole_angle_penalty + cart_velocity_penalty + pole_velocity_penalty)
+
+    return shaped_reward
 
 # Neural network for DQN
 class DQN(nn.Module):
@@ -392,7 +411,7 @@ validation_goals = [
     "high_action_noise_resilience",  # Test performance under high action noise
 ]
 
-def validate_agent(agent, env, validation_goals, num_episodes=5, timeout=10):
+def validate_agent(agent, env, validation_goals, num_episodes=5, timeout=30):
     validation_results = {}
 
     for goal in validation_goals:
@@ -600,7 +619,6 @@ convergence_goals = {
     "quick_recovery": -70
 }
 
-
 def update_convergence_goal(task_rewards, task_goal):
 
     # Sort the rewards in ascending order
@@ -638,48 +656,33 @@ def update_convergence_goal(task_rewards, task_goal):
     print(f"[DEBUG] Convergence goal for Task '{task_goal}' updated to: {median_value:.2f}")
 
 
-def check_convergence(reward_list, window_size, goal_name):
-    """Check for convergence based on positive rewards."""
+def check_convergence(task_rewards, window_size, current_goal, threshold=5.0):
+    # Get the rewards for the current goal from the most recent window of episodes
+    recent_rewards = task_rewards[-window_size:]
 
-    if len(reward_list) < window_size:
-        return False, None, None, None, None
+    # Calculate goal_min and goal_max over the recent rewards
+    goal_min = min(recent_rewards)
+    goal_max = max(recent_rewards)
 
-    # Calculate the rolling average and standard deviation
-    avg_reward = np.mean(reward_list[-window_size:])
-    std_reward = np.std(reward_list[-window_size:])
+    # Calculate average and standard deviation of the rewards in the window
+    avg_reward = np.mean(recent_rewards)
+    std_reward = np.std(recent_rewards)
 
-    # Define thresholds for convergence (tuning these based on your task is key)
-    reward_threshold = 0.9 * np.max(reward_list)  # Convergence threshold, e.g., 90% of max reward
-    std_threshold = 0.05  # Small standard deviation indicates stability
-
-    # Check if the reward is stable enough and the std is low
-    if avg_reward >= reward_threshold and std_reward <= std_threshold:
-        # Log the goal range for better understanding
-        goal_min = np.min(reward_list[-window_size:])
-        goal_max = np.max(reward_list[-window_size:])
-        return True, avg_reward, std_reward, goal_min, goal_max
+    # Check if the convergence criteria are met based on goal range (goal_max - goal_min)
+    if goal_max - goal_min < threshold:
+        is_converged_flag = True
     else:
-        return False, avg_reward, std_reward, None, None
+        is_converged_flag = False
 
-# Calculate success rate as the percentage of episodes where total reward >= threshold.
-def calculate_success_rate(task_rewards, window_size, task_goal):
-    if len(task_rewards) >= window_size:
-        # Compute the rolling average of the last `window_size` rewards
-        rolling_rewards = task_rewards[-window_size:]
+    # Debugging output for detailed tracking
+    print(f"[DEBUG] Convergence Check | Goal: {current_goal}")
+    print(f"Reward Window: {recent_rewards}")
+    print(f"Goal Range: ({goal_min:.2f}, {goal_max:.2f})")
+    print(f"Avg Reward: {avg_reward:.2f}, Std Reward: {std_reward:.2f}")
+    print(f"Is Converged Flag: {is_converged_flag}")
 
-        # Get the fixed success threshold for the current task
-        goal_min = convergence_goals[task_goal] + 10
-        goal_max = 0
+    return is_converged_flag, avg_reward, std_reward, goal_min, goal_max
 
-        # Count episodes where the reward is within the acceptable range
-        success_count = sum(1 for reward in rolling_rewards if goal_min <= reward <= goal_max)
-
-        # Success rate is the ratio of episodes where reward is within the range
-        success_rate = success_count / len(rolling_rewards)
-
-        return success_rate
-
-    return 0  # Return 0 if not enough data
 
 episode_count = 0
 # --- Training Loop ---
@@ -738,7 +741,6 @@ for episode in range(num_episodes):
         next_state, reward, done, _, _ = env.step(action)
         reward = get_goal_reward(shape_reward(state, next_state, reward), state, current_goal)
 
-
         replay_buffer.append((state, action, reward, next_state, done))
         total_steps += 1
         state = next_state
@@ -792,15 +794,15 @@ for episode in range(num_episodes):
     avg_reward = np.mean(current_rewards_window)
     std_reward = np.std(current_rewards_window)
 
+    # Call the check_convergence function
+    is_converged_flag, avg_reward_check, std_reward_check, goal_min, goal_max = check_convergence(
+        results[reg_type]["task_rewards"][current_goal], window_size, current_goal)
+
     # Check if values are None and provide a default if so
     avg_reward_check_str = f"{avg_reward_check:.2f}" if avg_reward_check is not None else "N/A"
     std_reward_check_str = f"{std_reward_check:.2f}" if std_reward_check is not None else "N/A"
     goal_min_str = f"{goal_min:.2f}" if goal_min is not None else "N/A"
     goal_max_str = f"{goal_max:.2f}" if goal_max is not None else "N/A"
-
-    # Call the check_convergence function
-    is_converged_flag, avg_reward_check, std_reward_check, goal_min, goal_max = check_convergence(
-        results[reg_type]["task_rewards"][current_goal], window_size, current_goal)
 
     # If converged, update the goal
     if is_converged_flag:
@@ -810,11 +812,18 @@ for episode in range(num_episodes):
     # Add a check to ensure that the values are not None before formatting them
     if avg_reward_check is not None and std_reward_check is not None and goal_min is not None and goal_max is not None:
         print(f"[DEBUG] Convergence Check | Goal: {current_goal}, "
-              f"Avg Reward: {avg_reward_check:.2f}, Std Reward: {std_reward_check:.2f}, "
+              f"Avg Reward (Last {window_size} Episodes): {avg_reward_check:.2f}, "
+              f"Std Reward (Last {window_size} Episodes): {std_reward_check:.2f}, "
               f"Goal Range: ({goal_min:.2f}, {goal_max:.2f}), "
-              f"Converged: {is_converged_flag}")
-    else:
-        print(f"[DEBUG] Convergence Check | Goal: {current_goal} has invalid reward values.")
+              f"Convergence Flag: {is_converged_flag}")
+
+        print(f"   Current Episode: {episode + 1}, Total Episodes for Goal: {current_task_episode_count[current_goal]}, "
+            f"Cumulative Rewards: {cumulative_rewards:.2f}, Current Episode Rewards: {total_reward:.2f}, "
+            f"Reward Window (Last {window_size} Episodes): {current_rewards_window}")
+
+        # Indicating if convergence has been met or not
+        if is_converged_flag:
+            print(f"[INFO] Convergence condition met for goal '{current_goal}'!")
 
     # Store per-episode details
     epoch_details.append({

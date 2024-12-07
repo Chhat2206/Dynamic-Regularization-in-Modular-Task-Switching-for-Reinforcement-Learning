@@ -598,26 +598,6 @@ def check_convergence(task_rewards, window_size, task_goal):
 
         return is_converged, avg_reward, std_reward, goal_min, goal_max
 
-# Calculate success rate as the percentage of episodes where total reward >= threshold.
-def calculate_success_rate(task_rewards, window_size, task_goal):
-    if len(task_rewards) >= window_size:
-        # Compute the rolling average of the last `window_size` rewards
-        rolling_rewards = task_rewards[-window_size:]
-
-        # Get the fixed success threshold for the current task
-        goal_min = convergence_goals[task_goal] - 10
-        goal_max = 0
-
-        # Count episodes where the reward is within the acceptable range
-        success_count = sum(1 for reward in rolling_rewards if goal_min <= reward <= goal_max)
-
-        # Success rate is the ratio of episodes where reward is within the range
-        success_rate = success_count / len(rolling_rewards)
-
-        return success_rate
-
-    return 0  # Return 0 if not enough data
-
 episode_count = 0
 # --- Training Loop ---
 print("Training Loop")
@@ -675,7 +655,6 @@ for episode in range(num_episodes):
         next_state, reward, done, _, _ = env.step(action)
         reward = get_goal_reward(shape_reward(state, next_state, reward), state, current_goal)
 
-
         replay_buffer.append((state, action, reward, next_state, done))
         total_steps += 1
         state = next_state
@@ -729,15 +708,15 @@ for episode in range(num_episodes):
     avg_reward = np.mean(current_rewards_window)
     std_reward = np.std(current_rewards_window)
 
+    # Check for convergence
+    is_converged_flag, avg_reward_check, std_reward_check, goal_min, goal_max = check_convergence(
+        results[reg_type]["task_rewards"][current_goal], window_size, current_goal)
+
     # Check if values are None and provide a default if so
     avg_reward_check_str = f"{avg_reward_check:.2f}" if avg_reward_check is not None else "N/A"
     std_reward_check_str = f"{std_reward_check:.2f}" if std_reward_check is not None else "N/A"
     goal_min_str = f"{goal_min:.2f}" if goal_min is not None else "N/A"
     goal_max_str = f"{goal_max:.2f}" if goal_max is not None else "N/A"
-
-    # Check for convergence
-    is_converged_flag, avg_reward_check, std_reward_check, goal_min, goal_max = check_convergence(
-        results[reg_type]["task_rewards"][current_goal], window_size, current_goal)
 
     if is_converged_flag:
         # Ensure the current goal is updated if convergence condition is met
