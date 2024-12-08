@@ -29,12 +29,12 @@ min_epsilon = 0.01
 batch_size = 128
 replay_buffer_size = 1000000
 replay_buffer = deque(maxlen=replay_buffer_size)
-num_episodes = 1000 # Use 1k
+num_episodes = 1200 # Use 1k
 target_update_frequency = 500
 stability_threshold = 0.01
 window_size = 10
 reward_window = collections.deque(maxlen=window_size)
-eval_interval = 200 # Use 200, this is for testing
+eval_interval = 150 # Use 200, this is for testing
 parameter_noise_stddev = 0.1  # Standard deviation for parameter noise (for RQ2)
 
 training_start_time = time.time()
@@ -245,8 +245,10 @@ def evaluate_knowledge_retention(agent, env, learned_tasks, num_episodes=5):
     retention_trends = []
 
     for task in learned_tasks:
-        avg_reward = evaluate_agent(env, q_network, num_episodes=5, goal=task)[0]
+        # Directly assign the average reward from evaluate_agent
+        avg_reward = evaluate_agent(env, q_network, num_episodes=5, goal=task)
         retention_trends.append({"task": task, "reward": avg_reward})
+
         total_rewards = []
         print(f"Evaluating knowledge retention for task: {task}")
         for episode in range(num_episodes):
@@ -259,11 +261,14 @@ def evaluate_knowledge_retention(agent, env, learned_tasks, num_episodes=5):
                 total_reward += reward
                 state = next_state
             total_rewards.append(total_reward)
+
         avg_reward = np.mean(total_rewards)
 
         retention_rewards[task] = avg_reward
         print(f"Knowledge Retention - Task: {task}, Avg Reward: {avg_reward}")
+
     return retention_rewards
+
 
 # Function to evaluate long-term adaptability
 def evaluate_long_term_adaptability(agent, env, tasks, num_episodes=5, max_eval_steps=300, early_stop_threshold=-200):
@@ -569,20 +574,19 @@ assigned_regularizations = set()
 task_to_reg = {}
 
 tasks = [
-    "original",        # Episodes 1-50
-    "quick_recovery",  # Episodes 51-100
-    "periodic_swing",  # Episodes 101-150
-    "maintain_balance",# Episodes 151-200
-    "original",        # Episodes 201-250
-    "quick_recovery",  # Episodes 251-300
-    "periodic_swing",  # Episodes 301-350
-    "maintain_balance",# Episodes 351-400
-    "original",        # Episodes 401-450
+    "original",        # Episodes 1-x
+    "quick_recovery",
+    "periodic_swing",
+    "maintain_balance",
+    "quick_recovery",
+    "periodic_swing",
+    "maintain_balance",
+    "original",
 ]
 
 # Function to determine current task based on episode number
 def get_current_task(episode_number):
-    task_index = (episode_number - 1) // 50  # Divide by 50 to get the task cycle index
+    task_index = (episode_number - 1) // 150  # Divide to get the task cycle index
     task_index = task_index % len(tasks)  # Ensure the index wraps around after the correct amount of episodes
     return tasks[task_index]
 
@@ -668,29 +672,28 @@ def check_convergence(task_rewards, window_size, current_goal, threshold=5.0):
     else:
         is_converged_flag = False
 
-    # Debugging output for detailed tracking
-    print(f"[DEBUG] Convergence Check | Goal: {current_goal}")
-    print(f"Reward Window: {recent_rewards}")
-    print(f"Goal Range: ({goal_min:.2f}, {goal_max:.2f})")
-    print(f"Avg Reward: {avg_reward:.2f}, Std Reward: {std_reward:.2f}")
-    print(f"Is Converged Flag: {is_converged_flag}")
-
     return is_converged_flag, avg_reward, std_reward, goal_min, goal_max
 
 # Calculate the performance of a given goal using the reward calculated by get_goal_reward function
 #     over a set number of episodes.
 def calculate_goal_performance(goal_name, env, q_network, epsilon=0, num_episodes=5):
     total_rewards = []  # List to track rewards across episodes
+    total_goals_rewards = []  # To track all rewards across episodes for goal reporting
+    episode_times = []  # To track time taken for each episode
 
     # Run the specified number of episodes
     for episode in range(num_episodes):
+        start_time = time.time()  # Start timing for the episode
+        print(f"\nRunning episode {episode + 1} | Goal: {goal_name}")
+
         episode_rewards = []  # Track rewards within a single episode
         state, _ = env.reset()  # Reset the environment to get the initial state
         done = False
 
         while not done:
             # Use epsilon-greedy policy to choose an action
-            action = q_network(torch.tensor(state, dtype=torch.float32).to(device)).argmax().item() if random.random() > epsilon else env.action_space.sample()
+            action = q_network(torch.tensor(state, dtype=torch.float32).to(
+                device)).argmax().item() if random.random() > epsilon else env.action_space.sample()
             next_state, reward, done, _, _ = env.step(action)
 
             # Calculate the goal-specific reward using the `get_goal_reward` function
@@ -701,10 +704,33 @@ def calculate_goal_performance(goal_name, env, q_network, epsilon=0, num_episode
 
         # Add the total reward of this episode to the list of rewards
         total_rewards.append(np.sum(episode_rewards))
+        total_goals_rewards.append(np.sum(episode_rewards))  # Collect total reward for the goal
+
+        end_time = time.time()  # End timing for the episode
+        episode_duration = end_time - start_time  # Duration in seconds
+        episode_times.append(episode_duration)
+
+        print(f"Episode {episode + 1} Total Reward: {np.sum(episode_rewards)}")
+        print(f"Episode {episode + 1} Duration: {episode_duration:.2f} seconds")
 
     # Calculate the average and variance of rewards
     avg_reward = np.mean(total_rewards) if total_rewards else None
     reward_variance = np.var(total_rewards) if total_rewards else None
+
+    # Calculate the average time per episode
+    avg_episode_time = np.mean(episode_times) if episode_times else None
+
+    # Print the total rewards across all episodes and how the average is calculated
+    total_sum = sum(total_goals_rewards)
+    print("\n--- Goal Rewards Calculation ---")
+    print(f"Total Rewards across all episodes: {total_sum} (sum of: {', '.join(map(str, total_goals_rewards))})")
+    print(f"Average Reward: {total_sum / num_episodes:.2f} = {total_sum} / {num_episodes}")
+    print(f"Average Time per Episode: {avg_episode_time:.2f} seconds")
+
+    # Evaluate if the trials are taking too long and suggest lowering the number of episodes
+    if avg_episode_time * num_episodes > 60:  # If total time exceeds 1 minute, suggest lowering the trials
+        print(
+            f"\nWarning: Total time ({avg_episode_time * num_episodes:.2f} seconds) exceeds 1 minute. Consider reducing the number of episodes.")
 
     return avg_reward, reward_variance
 
@@ -713,6 +739,8 @@ goal_performance_history = []
 
 # --- Training Loop ---
 print("Training Loop")
+timeout_duration = 60
+
 for episode in range(num_episodes):
     q_network.train()
     state, _ = env.reset()
@@ -759,6 +787,11 @@ for episode in range(num_episodes):
 
     # Run the episode
     while not done:
+        elapsed_time = time.time() - start_time
+        if elapsed_time > timeout_duration:
+            print(f"Episode {episode + 1} timed out after {elapsed_time:.2f} seconds.")
+            break
+
         if is_rq2: q_network = add_parameter_noise(q_network, stddev=parameter_noise_stddev)
 
         action = q_network(torch.tensor(state, dtype=torch.float32).to(
@@ -782,7 +815,7 @@ for episode in range(num_episodes):
     rewards_log = {"episode": [], "reward": []}
 
     episode_count += 1
-    if episode_count % 50 == 0:
+    if episode_count % 150 == 0:
         print(f"Clearing reward_window after episode {episode_count}")
         reward_window = collections.deque(maxlen=window_size)  # Reinitialize the deque
 
@@ -843,7 +876,6 @@ for episode in range(num_episodes):
               f"Convergence Flag: {is_converged_flag}")
 
         print(f"   Current Episode: {episode + 1}, Total Episodes for Goal: {current_task_episode_count[current_goal]}, "
-            f"Cumulative Rewards: {cumulative_rewards:.2f}, Current Episode Rewards: {total_reward:.2f}, "
             f"Reward Window (Last {window_size} Episodes): {current_rewards_window}")
 
         # Indicating if convergence has been met or not
@@ -864,7 +896,7 @@ for episode in range(num_episodes):
         "Episode Duration (s)": episode_duration,
     })
 
-    if episode % 50 == 0 and episode > 0:
+    if episode % 150 == 0 and episode > 0:
         print(
             f"\nStarting goal performance tracking for episode {episode}...")  # Print message indicating the start of tracking
 
@@ -894,8 +926,6 @@ for episode in range(num_episodes):
             "maintain_balance_avg_reward": maintain_balance_avg_reward,
             "maintain_balance_variance": maintain_balance_variance,
         }
-        print(f"\nGoal Performance for Episode {episode}:")
-        print(goal_performance)
 
     if is_converged_flag:
         if current_task_episode_count[current_goal] == 1:
@@ -1059,7 +1089,7 @@ def structured_testing(agent, env, noise_scenarios, num_episodes=5, max_steps=50
     return testing_results
 
 # Call the structured_testing function to get results for each scenario
-structured_testing_results = structured_testing(q_network, env, testing_scenarios, num_episodes=50, max_steps=500)
+structured_testing_results = structured_testing(q_network, env, testing_scenarios, num_episodes=150, max_steps=500)
 
 # Assuming structured_testing_results is the output of the function
 for scenario_name, result in structured_testing_results.items():
