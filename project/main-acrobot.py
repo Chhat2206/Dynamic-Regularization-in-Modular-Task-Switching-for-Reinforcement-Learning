@@ -79,12 +79,16 @@ class DQN(nn.Module):
 # Function to assign rewards based on the goal
 def get_goal_reward(reward, state, goal):
     if goal == "quick_recovery":
+        # If the agent is in an extreme angle (i.e., state[0] > 1.0), the reward is increased to encourage quick recovery to a more stable position.
         if abs(state[0]) > 1.0:
-            return reward + 1.0  # Reward the agent for quickly moving to a stable position from an extreme angle
-        elif goal == "periodic_swing":
-            return reward + np.clip(np.sin(state[1] * 5.0), -1, 1)  # Reward swinging behavior
+            return reward + 1.0
+    elif goal == "periodic_swing":
+        # The reward is adjusted based on a periodic sine function of the agent's position (state[1]),
+        # rewarding periodic swinging movements.
+        return reward + np.clip(np.sin(state[1] * 5.0), -1, 1)
     elif goal == "maintain_balance":
         return reward + (1.0 - abs(state[0]))  # Reward maintaining the top link at a horizontal position
+
     return reward
 
 # Function to add noise to state
@@ -313,7 +317,6 @@ if mode == "none":
 optimizer = optim.Adam(q_network.parameters(), lr=learning_rate, weight_decay=1e-4 if reg_type == "l2" else 0)
 replay_buffer = deque(maxlen=replay_buffer_size)
 
-epsilon = 1.0
 episode_rewards = []  # Track rewards per episode
 task_to_reg = {}  # Dictionary to store the task for regularized task switching
 previous_goal = None
@@ -598,7 +601,40 @@ def check_convergence(task_rewards, window_size, task_goal):
 
         return is_converged, avg_reward, std_reward, goal_min, goal_max
 
+# Calculate the performance of a given goal using the reward calculated by get_goal_reward function
+#     over a set number of episodes.
+def calculate_goal_performance(goal_name, env, q_network, epsilon=0, num_episodes=5):
+    total_rewards = []  # List to track rewards across episodes
+
+    # Run the specified number of episodes
+    for episode in range(num_episodes):
+        episode_rewards = []  # Track rewards within a single episode
+        state, _ = env.reset()  # Reset the environment to get the initial state
+        done = False
+
+        while not done:
+            # Use epsilon-greedy policy to choose an action
+            action = q_network(torch.tensor(state, dtype=torch.float32).to(device)).argmax().item() if random.random() > epsilon else env.action_space.sample()
+            next_state, reward, done, _, _ = env.step(action)
+
+            # Calculate the goal-specific reward using the `get_goal_reward` function
+            reward = get_goal_reward(reward, state, goal_name)
+
+            episode_rewards.append(reward)  # Collect reward for this time step
+            state = next_state
+
+        # Add the total reward of this episode to the list of rewards
+        total_rewards.append(np.sum(episode_rewards))
+
+    # Calculate the average and variance of rewards
+    avg_reward = np.mean(total_rewards) if total_rewards else None
+    reward_variance = np.var(total_rewards) if total_rewards else None
+
+    return avg_reward, reward_variance
+
 episode_count = 0
+goal_performance_history = []
+
 # --- Training Loop ---
 print("Training Loop")
 for episode in range(num_episodes):
@@ -647,7 +683,6 @@ for episode in range(num_episodes):
 
     # Run the episode
     while not done:
-
         if is_rq2: q_network = add_parameter_noise(q_network, stddev=parameter_noise_stddev)
 
         action = q_network(torch.tensor(state, dtype=torch.float32).to(
@@ -741,6 +776,40 @@ for episode in range(num_episodes):
         "Stability Std Reward (Last 10 Episodes)": std_reward,
         "Episode Duration (s)": episode_duration,
     })
+
+    # Track every 50 episodes
+    if episode % 50 == 0 and episode > 0:
+        print(
+            f"\nStarting goal performance tracking for episode {episode}...")  # Print message indicating the start of tracking
+
+        # Track and print the evaluation of each goal
+        print("Evaluating 'quick_recovery' goal...")
+        quick_recovery_avg_reward, quick_recovery_variance = calculate_goal_performance("quick_recovery", env,
+                                                                                        q_network)
+        print(f"Quick Recovery - Avg Reward: {quick_recovery_avg_reward}, Variance: {quick_recovery_variance}")
+
+        print("Evaluating 'periodic_swing' goal...")
+        periodic_swing_avg_reward, periodic_swing_variance = calculate_goal_performance("periodic_swing", env,
+                                                                                        q_network)
+        print(f"Periodic Swing - Avg Reward: {periodic_swing_avg_reward}, Variance: {periodic_swing_variance}")
+
+        print("Evaluating 'maintain_balance' goal...")
+        maintain_balance_avg_reward, maintain_balance_variance = calculate_goal_performance("maintain_balance", env,
+                                                                                            q_network)
+        print(f"Maintain Balance - Avg Reward: {maintain_balance_avg_reward}, Variance: {maintain_balance_variance}")
+
+        # Calculate performance for each goal
+        goal_performance = {
+            "episode": episode,
+            "quick_recovery_avg_reward": quick_recovery_avg_reward,
+            "quick_recovery_variance": quick_recovery_variance,
+            "periodic_swing_avg_reward": periodic_swing_avg_reward,
+            "periodic_swing_variance": periodic_swing_variance,
+            "maintain_balance_avg_reward": maintain_balance_avg_reward,
+            "maintain_balance_variance": maintain_balance_variance,
+        }
+        print(f"\nGoal Performance for Episode {episode}:")
+        print(goal_performance)
 
     if is_converged_flag:
         if current_task_episode_count[current_goal] == 1:
@@ -1020,6 +1089,7 @@ consolidated_results = {
     "episode": range(window_size, episode_count + 1),
     "rolling_avg_reward": avg_reward,
     "rolling_std_reward": std_reward,
+    "goal_performance_history": goal_performance_history,
 }
 
 all_results = []
@@ -1037,9 +1107,10 @@ def process_results(key, source_name, consolidated_results, all_results):
 # Define result keys and corresponding source names
 result_keys = [
     ('epoch_details', 'Epoch Details'), # Contains details about row A-L
-    ('structured_testing_results', 'Structured Testing Results'),
-    ('testing_results', 'Testing Results'),
+    ('structured_testing_results', 'Structured Gradual Increase Testing Results'),
+    ('testing_results', 'Noise Testing Results'),
     ('comparison_results', 'Comparison Results'),
+    ('goal_performance_history', 'Goal Performance (every 50 episodes)'),
 ]
 
 # Process and append each result type using the function
@@ -1062,7 +1133,7 @@ if 'validation_results' in consolidated_results and isinstance(consolidated_resu
     for goal, reward in consolidated_results['validation_results'].items():
         validation_results_flat.append({'goal': goal, 'average_reward': reward})
     validation_df = pd.DataFrame(validation_results_flat)
-    validation_df['Source'] = 'Validation Results (Single Snapshot)'
+    validation_df['Source'] = 'Validation Results (Final Results)'
     all_results.append(validation_df)
 
 # Concatenate all DataFrames into one final DataFrame
