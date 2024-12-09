@@ -643,6 +643,9 @@ def calculate_goal_performance(goal_name, env, q_network, epsilon=0, num_episode
                 timeout_process = Process(target=check_timeout, args=(start_time,))
                 timeout_process.start()
 
+                # Flag to track if action time has been printed once
+                action_time_printed = False
+
                 while not done:
                     # Monitor action selection time
                     start_action_time = time.time()
@@ -652,33 +655,37 @@ def calculate_goal_performance(goal_name, env, q_network, epsilon=0, num_episode
                             if random.random() > epsilon else env.action_space.sample()
                         action_time = time.time() - start_action_time
 
-                        # Only print action time if it exceeds the threshold
-                        if action_time > min_action_time:
+                        # If action time exceeds threshold and not printed yet, print and skip further evaluation for this episode
+                        if action_time > min_action_time and not action_time_printed:
                             action_time_ms = action_time * 1000  # Convert seconds to milliseconds
                             print(f"Action time: {action_time_ms:.4f} ms ({action_time_ms / 1000:.4f} seconds)")
+                            action_time_printed = True  # Mark action time as printed
+                            done = True  # Skip the current evaluation by marking the episode as done
 
-                        # Monitor environment step time
-                        start_step_time = time.time()
-                        next_state, reward, done, _, _ = env.step(action)
-                        step_time = time.time() - start_step_time
+                        # If action time is within the threshold, continue the evaluation
+                        if not action_time_printed:
+                            # Monitor environment step time
+                            start_step_time = time.time()
+                            next_state, reward, done, _, _ = env.step(action)
+                            step_time = time.time() - start_step_time
 
-                        # Check if the environment step took too long and handle timeout
-                        if step_time > step_time_limit:
-                            print(f"[WARNING] Environment step took too long ({step_time:.2f} seconds). Terminating episode.")
-                            done = True  # Force termination if step time exceeds the limit
-                            return None, None  # Return early if there's a timeout
+                            # Check if the environment step took too long and handle timeout
+                            if step_time > step_time_limit:
+                                print(f"[WARNING] Environment step took too long ({step_time:.2f} seconds). Terminating episode.")
+                                done = True  # Force termination if step time exceeds the limit
+                                return None, None  # Return early if there's a timeout
 
-                        # Calculate the goal-specific reward using the `get_goal_reward` function
-                        reward = get_goal_reward(reward, state, goal_name)
+                            # Calculate the goal-specific reward using the `get_goal_reward` function
+                            reward = get_goal_reward(reward, state, goal_name)
 
-                        episode_rewards.append(reward)  # Collect reward for this time step
-                        state = next_state
+                            episode_rewards.append(reward)  # Collect reward for this time step
+                            state = next_state
 
-                        # Check for timeout based on the flag
-                        if timeout_flag.value == 1:
-                            print(f"[WARNING] Episode {episode + 1} exceeded max time. Terminating.")
-                            done = True  # Force termination if timeout occurs
-                            break
+                            # Check for timeout based on the flag
+                            if timeout_flag.value == 1:
+                                print(f"[WARNING] Episode {episode + 1} exceeded max time. Terminating.")
+                                done = True  # Force termination if timeout occurs
+                                break
 
                     except Exception as e:
                         print(f"[ERROR] Error during episode {episode + 1} action step: {e}")
@@ -691,9 +698,10 @@ def calculate_goal_performance(goal_name, env, q_network, epsilon=0, num_episode
                 episode_time = time.time() - start_time
                 episode_times.append(episode_time)
 
-                # Add the total reward of this episode to the list of rewards
-                total_rewards.append(np.sum(episode_rewards))
-                total_goals_rewards.append(np.sum(episode_rewards))
+                # Add the total reward of this episode to the list of rewards if action time wasn't printed
+                if not action_time_printed:
+                    total_rewards.append(np.sum(episode_rewards))
+                    total_goals_rewards.append(np.sum(episode_rewards))
 
             except Exception as e:
                 print(f"[ERROR] Error during episode {episode + 1} for goal {goal_name}: {e}")
@@ -729,6 +737,7 @@ def calculate_goal_performance(goal_name, env, q_network, epsilon=0, num_episode
 
 episode_count = 0
 goal_performance_history = []
+goal_evaluation_results = []
 
 # --- Training Loop ---
 print("Training Loop")
@@ -901,6 +910,8 @@ for episode in range(num_episodes):
             "maintain_balance_avg_reward": maintain_balance_avg_reward,
             "maintain_balance_variance": maintain_balance_variance,
         }
+
+        goal_performance_history.append(goal_performance)
 
     if is_converged_flag:
         if current_task_episode_count[current_goal] == 1:

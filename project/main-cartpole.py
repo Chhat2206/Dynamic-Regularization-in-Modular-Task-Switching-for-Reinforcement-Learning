@@ -11,6 +11,7 @@ from collections import deque
 import time
 import pandas as pd
 import datetime
+from multiprocessing import Process, Manager
 
 env = gym.make("CartPole-v1")
 use_custom_goals = True  # Set False to train all episodes under the original goal in all episodes
@@ -701,65 +702,119 @@ def check_convergence(task_rewards, window_size, current_goal, reward_window, pe
 
     return is_converged_flag, avg_reward, std_reward, goal_min, goal_max
 
-# Calculate the performance of a given goal using the reward calculated by get_goal_reward function
-#     over a set number of episodes.
-def calculate_goal_performance(goal_name, env, q_network, epsilon=0, num_episodes=5):
+# Function to calculate the performance of a given goal using the reward calculated by get_goal_reward function
+def calculate_goal_performance(goal_name, env, q_network, epsilon=0, num_episodes=5, max_episode_time=30,
+                               min_action_time=0.01, step_time_limit=1.0):
     total_rewards = []  # List to track rewards across episodes
-    total_goals_rewards = []  # To track all rewards across episodes for goal reporting
-    episode_times = []  # To track time taken for each episode
+    episode_times = []  # List to track time per episode
+    total_goals_rewards = []  # List to track rewards for the goal across episodes
 
-    # Run the specified number of episodes
-    for episode in range(num_episodes):
-        start_time = time.time()  # Start timing for the episode
-        print(f"\nRunning episode {episode + 1} | Goal: {goal_name}")
+    # Manager to track shared timeout flag
+    with Manager() as manager:
+        timeout_flag = manager.Value('i', 0)  # Shared flag to indicate timeout
 
-        episode_rewards = []  # Track rewards within a single episode
-        state, _ = env.reset()  # Reset the environment to get the initial state
-        done = False
+        def check_timeout(start_time):
+            """Monitor elapsed time for timeouts."""
+            elapsed_time = time.time() - start_time
+            if elapsed_time > max_episode_time:
+                timeout_flag.value = 1  # Set flag if timeout exceeds max episode time
 
-        while not done:
-            # Use epsilon-greedy policy to choose an action
-            action = q_network(torch.tensor(state, dtype=torch.float32).to(
-                device)).argmax().item() if random.random() > epsilon else env.action_space.sample()
-            next_state, reward, done, _, _ = env.step(action)
+        for episode in range(num_episodes):
+            try:
+                print(f"Running episode {episode + 1} | Goal: {goal_name}")
+                start_time = time.time()  # Start time for this episode
 
-            # Calculate the goal-specific reward using the `get_goal_reward` function
-            reward = get_goal_reward(reward, state, goal_name)
+                episode_rewards = []  # Track rewards within a single episode
+                state, _ = env.reset()  # Reset the environment to get the initial state
+                done = False
 
-            episode_rewards.append(reward)  # Collect reward for this time step
-            state = next_state
+                # Start a process to monitor timeout
+                timeout_process = Process(target=check_timeout, args=(start_time,))
+                timeout_process.start()
 
-        # Add the total reward of this episode to the list of rewards
-        total_rewards.append(np.sum(episode_rewards))
-        total_goals_rewards.append(np.sum(episode_rewards))  # Collect total reward for the goal
+                while not done:
+                    # Monitor action selection time
+                    start_action_time = time.time()
+                    try:
+                        # Epsilon-greedy policy for action selection
+                        action = q_network(torch.tensor(state, dtype=torch.float32).to(device)).argmax().item() \
+                            if random.random() > epsilon else env.action_space.sample()
+                        action_time = time.time() - start_action_time
 
-        end_time = time.time()  # End timing for the episode
-        episode_duration = end_time - start_time  # Duration in seconds
-        episode_times.append(episode_duration)
+                        # Only print action time if it exceeds the threshold
+                        if action_time > min_action_time:
+                            action_time_ms = action_time * 1000  # Convert seconds to milliseconds
+                            print(f"Action time: {action_time_ms:.4f} ms ({action_time_ms / 1000:.4f} seconds)")
 
-        print(f"Episode {episode + 1} Total Reward: {np.sum(episode_rewards)}")
-        print(f"Episode {episode + 1} Duration: {episode_duration:.2f} seconds")
+                        # Monitor environment step time
+                        start_step_time = time.time()
+                        next_state, reward, done, _, _ = env.step(action)
+                        step_time = time.time() - start_step_time
 
-    # Calculate the average and variance of rewards
-    avg_reward = np.mean(total_rewards) if total_rewards else None
-    reward_variance = np.var(total_rewards) if total_rewards else None
+                        # Check if the environment step took too long and handle timeout
+                        if step_time > step_time_limit:
+                            print(f"[WARNING] Environment step took too long ({step_time:.2f} seconds). Terminating episode.")
+                            done = True  # Force termination if step time exceeds the limit
+                            return None, None  # Return early if there's a timeout
 
-    # Calculate the average time per episode
-    avg_episode_time = np.mean(episode_times) if episode_times else None
+                        # Calculate the goal-specific reward using the `get_goal_reward` function
+                        reward = get_goal_reward(reward, state, goal_name)
 
-    # Print the total rewards across all episodes and how the average is calculated
-    total_sum = sum(total_goals_rewards)
-    print("\n--- Goal Rewards Calculation ---")
-    print(f"Total Rewards across all episodes: {total_sum} (sum of: {', '.join(map(str, total_goals_rewards))})")
-    print(f"Average Reward: {total_sum / num_episodes:.2f} = {total_sum} / {num_episodes}")
-    print(f"Average Time per Episode: {avg_episode_time:.2f} seconds")
+                        episode_rewards.append(reward)  # Collect reward for this time step
+                        state = next_state
 
-    # Evaluate if the trials are taking too long and suggest lowering the number of episodes
-    if avg_episode_time * num_episodes > 60:  # If total time exceeds 1 minute, suggest lowering the trials
-        print(
-            f"\nWarning: Total time ({avg_episode_time * num_episodes:.2f} seconds) exceeds 1 minute. Consider reducing the number of episodes.")
+                        # Check for timeout based on the flag
+                        if timeout_flag.value == 1:
+                            print(f"[WARNING] Episode {episode + 1} exceeded max time. Terminating.")
+                            done = True  # Force termination if timeout occurs
+                            break
 
-    return avg_reward, reward_variance
+                    except Exception as e:
+                        print(f"[ERROR] Error during episode {episode + 1} action step: {e}")
+                        return None, None  # Exit if action step fails
+
+                # Stop timeout process
+                timeout_process.terminate()
+
+                # Calculate the time taken for the episode
+                episode_time = time.time() - start_time
+                episode_times.append(episode_time)
+
+                # Add the total reward of this episode to the list of rewards
+                total_rewards.append(np.sum(episode_rewards))
+                total_goals_rewards.append(np.sum(episode_rewards))
+
+            except Exception as e:
+                print(f"[ERROR] Error during episode {episode + 1} for goal {goal_name}: {e}")
+                return None, None  # Exit if any other error occurs
+
+        # Calculate the average and variance of rewards
+        try:
+            avg_reward = np.mean(total_rewards) if total_rewards else None
+            reward_variance = np.var(total_rewards) if total_rewards else None
+            avg_episode_time = np.mean(episode_times) if episode_times else None
+        except Exception as e:
+            print(f"[ERROR] Error during reward calculations: {e}")
+            return None, None  # Exit if reward calculations fail
+
+        # Print the total rewards and average reward calculation
+        total_sum = sum(total_goals_rewards)
+        print("\n--- Goal Rewards Calculation ---")
+        print(f"Total Rewards across all episodes: {total_sum} (sum of: {', '.join(map(str, total_goals_rewards))})")
+        print(f"Average Reward: {total_sum / num_episodes:.2f} = {total_sum} / {num_episodes}")
+
+        # Check if avg_episode_time is None before trying to print it
+        if avg_episode_time is not None:
+            print(f"Average Time per Episode: {avg_episode_time:.2f} seconds")
+        else:
+            print("Average Time per Episode: N/A (all episodes were skipped due to time limits)")
+
+        # Evaluate if the trials are taking too long and suggest lowering the number of episodes
+        if avg_episode_time and avg_episode_time * num_episodes > 60:  # If total time exceeds 1 minute, suggest reducing the trials
+            print(
+                f"\nWarning: Total time ({avg_episode_time * num_episodes:.2f} seconds) exceeds 1 minute. Consider reducing the number of episodes.")
+
+        return avg_reward, reward_variance
 
 episode_count = 0
 goal_performance_history = []
@@ -956,6 +1011,8 @@ for episode in range(num_episodes):
             "maintain_balance_avg_reward": maintain_balance_avg_reward,
             "maintain_balance_variance": maintain_balance_variance,
         }
+
+        goal_performance_history.append(goal_performance)
 
     if is_converged_flag:
         if current_task_episode_count[current_goal] == 1:
@@ -1280,6 +1337,16 @@ if 'validation_results' in consolidated_results and isinstance(consolidated_resu
     validation_df = pd.DataFrame(validation_results_flat)
     validation_df['Source'] = 'Validation Results (Final Results)'
     all_results.append(validation_df)
+
+if 'goal_performance_history' in locals() and goal_performance_history:
+    goal_performance_flat = []
+    for entry in goal_performance_history:
+        flat_entry = {'episode': entry['episode']}
+        flat_entry.update(entry)  # Update with goal performance data
+        goal_performance_flat.append(flat_entry)
+    goal_performance_df = pd.DataFrame(goal_performance_flat)
+    goal_performance_df['Source'] = 'Goal Performance (every 50 episodes)'
+    all_results.append(goal_performance_df)
 
 # Concatenate all DataFrames into one final DataFrame
 final_df = pd.concat(all_results, ignore_index=True)
