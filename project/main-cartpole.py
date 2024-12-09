@@ -29,12 +29,12 @@ min_epsilon = 0.01
 batch_size = 128
 replay_buffer_size = 1000000
 replay_buffer = deque(maxlen=replay_buffer_size)
-num_episodes = 1200 # Use 1k
 target_update_frequency = 500
 stability_threshold = 0.01
 window_size = 10
 reward_window = collections.deque(maxlen=window_size)
-eval_interval = 150 # Use 200, this is for testing
+eval_interval = 100
+num_episodes = eval_interval * 8
 parameter_noise_stddev = 0.1  # Standard deviation for parameter noise (for RQ2)
 
 training_start_time = time.time()
@@ -95,22 +95,48 @@ class DQN(nn.Module):
 # Function to assign rewards based on the goal
 def get_goal_reward(reward, state, goal):
     if goal == "quick_recovery":
-        # Reward for quick recovery (balance pole quickly after disturbance)
-        if abs(state[2]) > 0.1:  # if pole angle is greater than a threshold
-            reward += 5  # Give a large reward for recovering
+        angle_deviation = abs(state[2])  # Pole angle deviation
+        speed_of_recovery = abs(state[3])  # Angular velocity (speed of recovery)
+
+        # Reward based on how quickly the pole is returning to the upright position
+        if angle_deviation > 0.1:
+            reward += 5 / (angle_deviation + 0.1)
+            if speed_of_recovery < 0.5:
+                reward -= 0.5  # Penalty for slow recovery
         else:
-            reward -= 0.1  # Small penalty for not recovering quickly
+            reward += 0.1  # Small reward for maintaining near upright position
+
+        # Apply penalty for extreme deviations
+        if abs(state[0]) > 2.4 or angle_deviation > 0.2:
+            reward -= 1
+
     elif goal == "periodic_swing":
-        # Reward for periodic swinging motion (keep pole in periodic motion)
-        if 0.05 < abs(state[2]) < 0.1:  # Swinging but within limits
+        swing_angle = abs(state[2])  # Swing angle deviation from periodic motion
+        swing_speed = abs(state[3])  # Swing speed
+
+        # Reward for keeping the pole in periodic motion within limits
+        if 0.05 < swing_angle < 0.1:
             reward += 1
+            if swing_speed < 0.5:
+                reward -= 0.2  # Penalty for slow swings
         else:
             reward -= 0.05  # Slight penalty for not maintaining periodic swing
+
     elif goal == "maintain_balance":
-        # Reward for maintaining balance (the longer the agent balances, the higher the reward)
-        reward += 0.1  # Small reward for each time step spent balanced
-        if abs(state[0]) > 2.4 or abs(state[2]) > 0.2:  # Large position or angle deviation
-            reward -= 1  # Penalty for deviating too far
+        cart_position = abs(state[0])  # Position of the cart
+        cart_velocity = abs(state[1])  # Velocity of the cart
+
+        # Reward for small, controlled cart movements
+        if cart_position < 0.5 and cart_velocity < 0.1:
+            reward += 1
+        elif cart_position < 1.0 and cart_velocity < 0.2:
+            reward += 0.5
+        else:
+            reward -= 0.1  # Penalty for large or fast movements
+
+    # Log reward and state for debugging
+    # print(f"Goal: {goal}, Reward: {reward}, State: {state}")
+
     return reward
 
 # Function to add noise to state
@@ -586,7 +612,7 @@ tasks = [
 
 # Function to determine current task based on episode number
 def get_current_task(episode_number):
-    task_index = (episode_number - 1) // 150  # Divide to get the task cycle index
+    task_index = (episode_number - 1) // eval_interval  # Divide to get the task cycle index
     task_index = task_index % len(tasks)  # Ensure the index wraps around after the correct amount of episodes
     return tasks[task_index]
 
@@ -654,20 +680,21 @@ def update_convergence_goal(task_rewards, task_goal):
     # Print the updated convergence goal
     print(f"[DEBUG] Convergence goal for Task '{task_goal}' updated to: {median_value:.2f}")
 
-def check_convergence(task_rewards, window_size, current_goal, threshold=5.0):
-    # Get the rewards for the current goal from the most recent window of episodes
-    recent_rewards = task_rewards[-window_size:]
+def check_convergence(task_rewards, window_size, current_goal, reward_window, percentage=5.0):
 
     # Calculate goal_min and goal_max over the recent rewards
-    goal_min = min(recent_rewards)
-    goal_max = max(recent_rewards)
+    goal_min = min(reward_window)
+    goal_max = max(reward_window)
 
     # Calculate average and standard deviation of the rewards in the window
-    avg_reward = np.mean(recent_rewards)
-    std_reward = np.std(recent_rewards)
+    avg_reward = np.mean(reward_window)  # Use the reward_window for threshold calculation
+    std_reward = np.std(reward_window)
+
+    # Calculate the total reward threshold dynamically as a percentage of avg_reward
+    total_reward_threshold = avg_reward * (percentage / 100)
 
     # Check if the convergence criteria are met based on goal range (goal_max - goal_min)
-    if goal_max - goal_min < threshold:
+    if goal_max - goal_min < total_reward_threshold:
         is_converged_flag = True
     else:
         is_converged_flag = False
@@ -815,7 +842,7 @@ for episode in range(num_episodes):
     rewards_log = {"episode": [], "reward": []}
 
     episode_count += 1
-    if episode_count % 150 == 0:
+    if episode_count % eval_interval == 0:
         print(f"Clearing reward_window after episode {episode_count}")
         reward_window = collections.deque(maxlen=window_size)  # Reinitialize the deque
 
@@ -852,9 +879,12 @@ for episode in range(num_episodes):
     avg_reward = np.mean(current_rewards_window)
     std_reward = np.std(current_rewards_window)
 
-    # Call the check_convergence function
+    task_rewards = list(reward_window)
+
+    # Now call the convergence check
     is_converged_flag, avg_reward_check, std_reward_check, goal_min, goal_max = check_convergence(
-        results[reg_type]["task_rewards"][current_goal], window_size, current_goal)
+        task_rewards, window_size, current_goal, reward_window, percentage=5.0
+    )
 
     # Check if values are None and provide a default if so
     avg_reward_check_str = f"{avg_reward_check:.2f}" if avg_reward_check is not None else "N/A"
@@ -896,7 +926,7 @@ for episode in range(num_episodes):
         "Episode Duration (s)": episode_duration,
     })
 
-    if episode % 150 == 0 and episode > 0:
+    if episode % eval_interval == 0 and episode > 0:
         print(
             f"\nStarting goal performance tracking for episode {episode}...")  # Print message indicating the start of tracking
 
@@ -1089,7 +1119,7 @@ def structured_testing(agent, env, noise_scenarios, num_episodes=5, max_steps=50
     return testing_results
 
 # Call the structured_testing function to get results for each scenario
-structured_testing_results = structured_testing(q_network, env, testing_scenarios, num_episodes=150, max_steps=500)
+structured_testing_results = structured_testing(q_network, env, testing_scenarios, num_episodes=50, max_steps=500)
 
 # Assuming structured_testing_results is the output of the function
 for scenario_name, result in structured_testing_results.items():
