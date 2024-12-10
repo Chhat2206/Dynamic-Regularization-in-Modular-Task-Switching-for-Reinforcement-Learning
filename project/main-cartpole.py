@@ -1350,7 +1350,7 @@ if 'goal_performance_history' in locals() and goal_performance_history:
 
 # Concatenate all DataFrames into one final DataFrame
 final_df = pd.concat(all_results, ignore_index=True)
-filename = f"results_{'rq1' if is_rq1 else 'rq2'}_{mode if mode != 'none' else f'fixed_{fixed_reg_type}'}.xlsx"
+filename = f"cartpole_results_{'rq1' if is_rq1 else 'rq2'}_{mode if mode != 'none' else f'fixed_{fixed_reg_type}'}.xlsx"
 final_df.to_excel(filename, index=False)
 print(f"All results saved to '{filename}'")
 

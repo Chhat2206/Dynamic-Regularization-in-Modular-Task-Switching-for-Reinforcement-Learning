@@ -1,5 +1,7 @@
 #!pip install gymnasium
 import collections
+import threading
+
 from matplotlib import pyplot as plt
 import gymnasium as gym
 import numpy as np
@@ -96,12 +98,20 @@ def get_goal_reward(reward, state, goal):
         # Reward for keeping the top link near the horizontal position (angle = 0)
         if top_link_angle < 0.1 and top_link_angular_velocity < 0.05:  # Small angle and low angular velocity
             reward += 1  # Strong reward for maintaining horizontal position with little movement
+            reward += 0.1  # Bonus for maintaining balance for a longer time (time-based reward)
         elif top_link_angle < 0.2 and top_link_angular_velocity < 0.1:  # Slightly larger angle and velocity
             reward += 0.5  # Moderate reward for smaller deviations from horizontal
         else:
             reward -= 0.1  # Penalty for larger angles or faster movements away from balance
+            reward -= (top_link_angle - 0.2) * 0.5  # Gradual penalty for larger angle deviations
+            reward -= (top_link_angular_velocity - 0.1) * 0.3  # Gradual penalty for higher velocity deviations
+
+        # Heavy penalty for falling over or extreme angles
+        if top_link_angle > np.pi / 2:  # Extreme angle (e.g., more than 90 degrees)
+            reward -= 10  # Heavy penalty for falling over
 
     return reward
+
 
 # Function to add noise to state
 def add_noise_to_state(state, noise_level=0.1):
@@ -651,11 +661,12 @@ def calculate_goal_performance(goal_name, env, q_network, epsilon=0, num_episode
                     start_action_time = time.time()
                     try:
                         # Epsilon-greedy policy for action selection
-                        action = q_network(torch.tensor(state, dtype=torch.float32).to(device)).argmax().item() \
-                            if random.random() > epsilon else env.action_space.sample()
-                        action_time = time.time() - start_action_time
+                        output = q_network(torch.tensor(state, dtype=torch.float32).to(device))
+                        # print(f"q_network output: {output}, type: {type(output)}")  # Debug print
+                        action = output.argmax().item() if random.random() > epsilon else env.action_space.sample()
 
                         # If action time exceeds threshold and not printed yet, print and skip further evaluation for this episode
+                        action_time = time.time() - start_action_time
                         if action_time > min_action_time and not action_time_printed:
                             action_time_ms = action_time * 1000  # Convert seconds to milliseconds
                             print(f"Action time: {action_time_ms:.4f} ms ({action_time_ms / 1000:.4f} seconds)")
@@ -671,7 +682,8 @@ def calculate_goal_performance(goal_name, env, q_network, epsilon=0, num_episode
 
                             # Check if the environment step took too long and handle timeout
                             if step_time > step_time_limit:
-                                print(f"[WARNING] Environment step took too long ({step_time:.2f} seconds). Terminating episode.")
+                                print(
+                                    f"[WARNING] Environment step took too long ({step_time:.2f} seconds). Terminating episode.")
                                 done = True  # Force termination if step time exceeds the limit
                                 return None, None  # Return early if there's a timeout
 
@@ -1240,7 +1252,7 @@ if 'validation_results' in consolidated_results and isinstance(consolidated_resu
 
 # Concatenate all DataFrames into one final DataFrame
 final_df = pd.concat(all_results, ignore_index=True)
-filename = f"results_{'rq1' if is_rq1 else 'rq2'}_{mode if mode != 'none' else f'fixed_{fixed_reg_type}'}.xlsx"
+filename = f"acrobot_results_{'rq1' if is_rq1 else 'rq2'}_{mode if mode != 'none' else f'fixed_{fixed_reg_type}'}.xlsx"
 final_df.to_excel(filename, index=False)
 print(f"All results saved to '{filename}'")
 
