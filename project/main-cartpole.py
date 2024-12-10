@@ -17,7 +17,7 @@ env = gym.make("CartPole-v1")
 use_custom_goals = True  # Set False to train all episodes under the original goal in all episodes
 is_rq1 = True  # Set this to True to evaluate RQ1, and automatically set RQ2 to False
 is_rq2 = not is_rq1
-mode = "none"  # Options are "none", "cyclic_task_switching", "randomized_task_switching"
+mode = "none"  # Options are "none", "cyclic_task_switching", "randomized_task_switching", "structured_task_switching"
 goals = ["quick_recovery", "periodic_swing", "maintain_balance"]
 fixed_reg_type = "dropout"  # Choose from ["dropout", "l1", "l2", "batch_norm"]
 
@@ -632,6 +632,33 @@ def get_next_reg(episode, cycle_length=4):
 
     return reg_type
 
+# Initialize task-to-regularization assignments dictionary
+task_to_reg = {}
+
+# Chooses a regularization type for the current task in structured task switching mode.
+def get_task_regularization_structured(episode):
+    # Determine the current task (goal) for the episode
+    current_goal = get_current_task(episode + 1)
+
+    # If this task hasn't been assigned a regularization type, assign one randomly
+    if current_goal not in task_to_reg:
+        # Randomly shuffle the list of available regularizations and pick one that isn't already assigned
+        available_regs = [reg for reg in regularization_types if reg not in task_to_reg.values()]
+
+        if available_regs:  # Ensure there are still regularization types available to assign
+            reg_type = random.choice(available_regs)
+            task_to_reg[current_goal] = reg_type
+            print(f"[DEBUG] Assigned {reg_type} to task '{current_goal}' (Episode {episode + 1})")
+        else:
+            raise ValueError("No available regularizations left for task assignments.")
+    else:
+        # If the regularization type is already assigned, just print it
+        reg_type = task_to_reg[current_goal]
+        # print(f"[DEBUG] Task '{current_goal}' already assigned '{reg_type}' (Episode {episode + 1})")
+
+    # Return the regularization type assigned to this task
+    return reg_type
+
 validation_results_history = []
 cumulative_rewards = 0
 previous_cumulative_rewards = 0
@@ -838,6 +865,7 @@ for episode in range(num_episodes):
     if mode == "none": reg_type = fixed_reg_type  # Use the pre-defined fixed regularization type throughout
     elif mode == "cyclic_task_switching": reg_type = get_next_reg(episode)
     elif mode == "randomized_task_switching": reg_type = random.choice(regularization_types)
+    elif mode == "structured_task_switching": reg_type = get_task_regularization_structured(episode)
     else: raise ValueError(f"Unrecognized mode: {mode}")
 
     # Update the regularization type in the model if needed
