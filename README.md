@@ -1,4 +1,89 @@
-# RL-in-GYM
-RQ1: How do different regularization techniques impact the performance and knowledge retention of a DQN agent under rapid task switching in the Acrobot environment, particularly when exposed to state noise?
+# Dynamic Regularization in Modular Task Switching for Reinforcement Learning
 
-RQ2: How does combining the promising regularization techniques with parameter noise influence the learning stability and adaptability of a modular DQN agent under rapid task switching and stochastic state noise?
+## Overview
+This repository contains the implementation of dynamic regularization techniques for modular task switching environments using Deep Q-Networks (DQN). The project evaluates the impact of different regularization strategies—Cyclic, Structured, Randomized, and Standardized—on agent performance within the **CartPole** and **Acrobot** environments from OpenAI's Gymnasium.
+
+The experiments are designed to test agent adaptability, knowledge retention, long-term learning stability, and resilience against noisy environments.
+
+## Features
+- **Dynamic Task-Specific Regularization:** Switches between Dropout, L1, L2, and Batch Normalization based on task requirements.
+- **Modular Architecture:** Facilitates effective task isolation and knowledge retention.
+- **Multi-Task Learning:** Supports cyclic, randomized, and structured task-switching.
+- **Noise Resilience:** Evaluates agent performance under varying state and action noise conditions.
+- **Custom Reward Shaping:** Optimizes learning efficiency for specific tasks like quick recovery, periodic swinging, and maintaining balance.
+
+## Repository Structure
+```
+.
+├── main-cartpole.py          # DQN implementation for the CartPole environment
+├── main-acrobot.py           # DQN implementation for the Acrobot environment
+├── Dynamic_Regularization_in_Modular_Task_Switching_RL.pdf # Research report detailing experimental methodology and results
+├── README.md                 # Project documentation
+```
+
+## Environments
+- **CartPole-v1:** Focuses on balancing a pole on a moving cart.
+- **Acrobot-v1:** A two-link pendulum system that requires the agent to swing the end-effector to a target height.
+
+## Regularization Techniques
+- **Dropout:** Reduces overfitting by randomly dropping units during training.
+- **L1 Regularization:** Promotes sparsity in network weights, enhancing robustness.
+- **L2 Regularization:** Penalizes large weights to improve generalization.
+- **Batch Normalization:** Normalizes layer inputs to stabilize learning.
+
+## Task-Switching Modes
+1. **Cyclic Task Switching:** Regularization techniques cycle through a predefined sequence.
+2. **Structured Task Switching:** Retains memory of regularization strategies for specific tasks.
+3. **Randomized Task Switching:** Randomly assigns regularization techniques per task.
+4. **Standardized Regularization:** Applies a fixed regularization strategy throughout the training.
+
+## Installation
+Ensure you have Python 3.8+ installed. Then, run the following commands:
+
+```bash
+pip install gymnasium torch numpy matplotlib pandas
+```
+
+## How to Run
+### CartPole Environment:
+```bash
+python main-cartpole.py
+```
+
+### Acrobot Environment:
+```bash
+python main-acrobot.py
+```
+
+## Hyperparameters
+Adjust key parameters in the script files:
+- `learning_rate = 0.0001`
+- `gamma = 0.99`
+- `epsilon_decay = 0.995`
+- `batch_size = 128`
+- `num_episodes = 450`
+
+## Results & Evaluation
+The results of the experiments, including average rewards, stability metrics, and adaptability scores, are detailed in `Dynamic_Regularization_in_Modular_Task_Switching_RL.pdf`. The report includes:
+- Performance comparisons across regularization techniques.
+- Noise resilience and knowledge retention analysis.
+- Convergence speed metrics for different task-switching modes.
+
+## Citation
+If you find this work useful, please consider citing the accompanying report:
+
+```bibtex
+@article{sehgal2024dynamic,
+  title={Evaluating the Impact of Dynamic Cyclic & Structured Regularization Techniques in Modular Task Switching Environments},
+  author={Chhatresh Sehgal},
+  year={2024},
+  institution={University of Nottingham}
+}
+```
+
+## License
+This project is licensed under the MIT License.
+
+## Acknowledgements
+Special thanks to the University of Nottingham and the OpenAI Gym community for providing the foundational tools and resources to support this research.
+
