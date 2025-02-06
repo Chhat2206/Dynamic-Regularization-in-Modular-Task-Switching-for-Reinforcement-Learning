@@ -54,36 +54,3 @@ python main-cartpole.py
 ```bash
 python main-acrobot.py
 ```
-
-## Hyperparameters
-Adjust key parameters in the script files:
-- `learning_rate = 0.0001`
-- `gamma = 0.99`
-- `epsilon_decay = 0.995`
-- `batch_size = 128`
-- `num_episodes = 450`
-
-## Results & Evaluation
-The results of the experiments, including average rewards, stability metrics, and adaptability scores, are detailed in `Dynamic_Regularization_in_Modular_Task_Switching_RL.pdf`. The report includes:
-- Performance comparisons across regularization techniques.
-- Noise resilience and knowledge retention analysis.
-- Convergence speed metrics for different task-switching modes.
-
-## Citation
-If you find this work useful, please consider citing the accompanying report:
-
-```bibtex
-@article{sehgal2024dynamic,
-  title={Evaluating the Impact of Dynamic Cyclic & Structured Regularization Techniques in Modular Task Switching Environments},
-  author={Chhatresh Sehgal},
-  year={2024},
-  institution={University of Nottingham}
-}
-```
-
-## License
-This project is licensed under the MIT License.
-
-## Acknowledgements
-Special thanks to the University of Nottingham and the OpenAI Gym community for providing the foundational tools and resources to support this research.
-
